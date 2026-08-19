@@ -15,13 +15,16 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   create-release:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
       contents: write
-      pull-requests: write
     steps:
       - name: Verify release branch
         run: |
@@ -49,11 +52,40 @@ jobs:
           server-id: central
           server-username: MAVEN_USERNAME
           server-password: MAVEN_PASSWORD
-          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
-          gpg-passphrase: MAVEN_GPG_PASSPHRASE
 
-      - name: Verify
-        run: mvn --batch-mode --no-transfer-progress verify
+      - name: Validate publishing credentials
+        env:
+          PGP_SECRET: ${{ secrets.PGP_SECRET }}
+          PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
+          SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "$PGP_SECRET" ] || missing+=(PGP_SECRET)
+          [ -n "$PGP_PASSPHRASE" ] || missing+=(PGP_PASSPHRASE)
+          [ -n "$SONATYPE_USERNAME" ] || missing+=(SONATYPE_USERNAME)
+          [ -n "$SONATYPE_PASSWORD" ] || missing+=(SONATYPE_PASSWORD)
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "::error::Missing publishing secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Import GPG signing key
+        env:
+          PGP_SECRET: ${{ secrets.PGP_SECRET }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d "$HOME/.gnupg"
+          printf '%s' "$PGP_SECRET" | base64 --decode | gpg --batch --yes --import
+          echo "allow-loopback-pinentry" >> "$HOME/.gnupg/gpg-agent.conf"
+          gpgconf --kill gpg-agent
+          gpg --batch --list-secret-keys --with-colons | grep -q '^sec:'
+
+      - name: Verify and sign release artifacts
+        run: mvn --batch-mode --no-transfer-progress -P release verify
+        env:
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
 
       - name: Get latest release tag
         id: latest
@@ -99,7 +131,6 @@ jobs:
             const releaseVersion = `${major}.${minor}.${patch}`;
             core.setOutput('release_version', releaseVersion);
             core.setOutput('release_tag', `v${releaseVersion}`);
-            core.setOutput('next_snapshot', `${major}.${minor}.${patch + 1}-SNAPSHOT`);
 
       - name: Create and push release tag
         env:
@@ -114,34 +145,14 @@ jobs:
         run: mvn --batch-mode --no-transfer-progress versions:set -DnewVersion="$RELEASE_VERSION" -DgenerateBackupPoms=false
 
       - name: Publish to Maven Central
-        run: mvn --batch-mode --no-transfer-progress -P release deploy -DskipTests
+        run: mvn --batch-mode --no-transfer-progress -P release clean deploy -DskipTests
         env:
-          MAVEN_USERNAME: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
-          MAVEN_PASSWORD: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
-          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          MAVEN_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          MAVEN_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
         run: gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes
-
-      - name: Open next-SNAPSHOT pull request
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NEXT_SNAPSHOT: ${{ steps.version.outputs.next_snapshot }}
-          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          branch="chore/bump-to-$NEXT_SNAPSHOT"
-          git checkout -b "$branch"
-          mvn --batch-mode --no-transfer-progress versions:set \
-            -DnewVersion="$NEXT_SNAPSHOT" \
-            -DgenerateBackupPoms=false
-          git add pom.xml
-          git commit -m "chore(release): bump version to $NEXT_SNAPSHOT"
-          git push origin "$branch"
-          gh pr create --repo "$REPOSITORY" --base main --head "$branch" \
-            --title "chore(release): bump version to $NEXT_SNAPSHOT" \
-            --body "Post-release bookkeeping for **$RELEASE_TAG**. This updates the development version to **$NEXT_SNAPSHOT**; the release and its Maven Central artifact are already published."
