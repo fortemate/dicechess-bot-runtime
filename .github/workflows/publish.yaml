@@ -5,26 +5,46 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      recover_v1_0_0:
+        description: "Recover the already-created v1.0.0 tag"
+        required: true
+        type: boolean
+        default: false
 
 permissions: {}
+
+concurrency:
+  group: publish-${{ github.event_name == 'workflow_dispatch' && 'v1.0.0' || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: read
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && 'v1.0.0' || github.ref_name }}
     steps:
       - name: Verify release tag
         run: |
-          case "$GITHUB_REF_NAME" in
-            v[0-9]*.[0-9]*.[0-9]*) echo "Publishing $GITHUB_REF_NAME" ;;
-            *) echo "::error::Expected a vX.Y.Z tag, got '$GITHUB_REF_NAME'"; exit 1 ;;
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$RECOVER_V1_0_0" != "true" ]; then
+            echo "::error::The manual recovery must be explicitly confirmed"
+            exit 1
+          fi
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) echo "Publishing $RELEASE_TAG" ;;
+            *) echo "::error::Expected a vX.Y.Z tag, got '$RELEASE_TAG'"; exit 1 ;;
           esac
+        env:
+          RECOVER_V1_0_0: ${{ inputs.recover_v1_0_0 }}
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Setup Java and Maven Central credentials
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
@@ -35,18 +55,68 @@ jobs:
           server-id: central
           server-username: MAVEN_USERNAME
           server-password: MAVEN_PASSWORD
-          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
-          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+      - name: Validate publishing credentials
+        env:
+          PGP_SECRET: ${{ secrets.PGP_SECRET }}
+          PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
+          SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "$PGP_SECRET" ] || missing+=(PGP_SECRET)
+          [ -n "$PGP_PASSPHRASE" ] || missing+=(PGP_PASSPHRASE)
+          [ -n "$SONATYPE_USERNAME" ] || missing+=(SONATYPE_USERNAME)
+          [ -n "$SONATYPE_PASSWORD" ] || missing+=(SONATYPE_PASSWORD)
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "::error::Missing publishing secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Import GPG signing key
+        env:
+          PGP_SECRET: ${{ secrets.PGP_SECRET }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d "$HOME/.gnupg"
+          printf '%s' "$PGP_SECRET" | base64 --decode | gpg --batch --yes --import
+          echo "allow-loopback-pinentry" >> "$HOME/.gnupg/gpg-agent.conf"
+          gpgconf --kill gpg-agent
+          gpg --batch --list-secret-keys --with-colons | grep -q '^sec:'
 
       - name: Set release version
-        run: mvn --batch-mode --no-transfer-progress versions:set -DnewVersion="${GITHUB_REF_NAME#v}" -DgenerateBackupPoms=false
+        run: mvn --batch-mode --no-transfer-progress versions:set -DnewVersion="${RELEASE_TAG#v}" -DgenerateBackupPoms=false
 
       - name: Verify
         run: mvn --batch-mode --no-transfer-progress verify
 
+      - name: Check Maven Central
+        id: central
+        run: |
+          version="${RELEASE_TAG#v}"
+          pom_url="https://repo1.maven.org/maven2/com/fortemate/dicechess-bot-runtime/$version/dicechess-bot-runtime-$version.pom"
+          if curl --fail --silent --head "$pom_url" >/dev/null; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "com.fortemate:dicechess-bot-runtime:$version is already published"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to Maven Central
-        run: mvn --batch-mode --no-transfer-progress -P release deploy -DskipTests
+        if: steps.central.outputs.published != 'true'
+        run: mvn --batch-mode --no-transfer-progress -P release clean deploy -DskipTests
         env:
-          MAVEN_USERNAME: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
-          MAVEN_PASSWORD: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
-          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          MAVEN_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          MAVEN_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
+
+      - name: Create GitHub release if missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "GitHub release $RELEASE_TAG already exists"
+          else
+            gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes
+          fi
