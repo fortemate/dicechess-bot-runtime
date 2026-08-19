@@ -33,10 +33,11 @@ jobs:
             echo "::error::The manual recovery must be explicitly confirmed"
             exit 1
           fi
-          case "$RELEASE_TAG" in
-            v[0-9]*.[0-9]*.[0-9]*) echo "Publishing $RELEASE_TAG" ;;
-            *) echo "::error::Expected a vX.Y.Z tag, got '$RELEASE_TAG'"; exit 1 ;;
-          esac
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected a vX.Y.Z tag, got '$RELEASE_TAG'"
+            exit 1
+          fi
+          echo "Publishing $RELEASE_TAG"
         env:
           RECOVER_V1_0_0: ${{ inputs.recover_v1_0_0 }}
 
@@ -94,14 +95,23 @@ jobs:
       - name: Check Maven Central
         id: central
         run: |
+          set -euo pipefail
           version="${RELEASE_TAG#v}"
           pom_url="https://repo1.maven.org/maven2/com/fortemate/dicechess-bot-runtime/$version/dicechess-bot-runtime-$version.pom"
-          if curl --fail --silent --head "$pom_url" >/dev/null; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-            echo "com.fortemate:dicechess-bot-runtime:$version is already published"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
+          status="$(curl --silent --show-error --location --head --output /dev/null --write-out '%{http_code}' "$pom_url")"
+          case "$status" in
+            200)
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              echo "com.fortemate:dicechess-bot-runtime:$version is already published"
+              ;;
+            404)
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Maven Central lookup returned HTTP $status"
+              exit 1
+              ;;
+          esac
 
       - name: Publish to Maven Central
         if: steps.central.outputs.published != 'true'
