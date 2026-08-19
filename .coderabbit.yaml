@@ -1,0 +1,44 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: en-US
+
+reviews:
+  profile: assertive
+  high_level_summary: false
+  poem: false
+  collapse_walkthrough: true
+  auto_review:
+    enabled: false
+    drafts: false
+    base_branches:
+      - main
+  path_filters:
+    - "!target/**"
+    - "!**/*.class"
+    - "!**/*.jar"
+  tools:
+    actionlint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    shellcheck:
+      enabled: true
+    markdownlint:
+      enabled: true
+  path_instructions:
+    - path: "src/main/java/**"
+      instructions: |
+        This is a small Java 25 transport library whose public API must remain callable from Java,
+        Kotlin, and Scala. Flag framework types leaking through public signatures, signature checks
+        that are not constant-time, replay-window regressions, and exceptions escaping WebhookHandler.
+    - path: "src/test/java/**"
+      instructions: |
+        Tests use JUnit Jupiter and AssertJ. Preserve the real-HTTP end-to-end test and the shared
+        ecosystem HMAC test vector when changing protocol behavior.
+    - path: "pom.xml"
+      instructions: |
+        Keep Maven coordinates under com.fortemate, Java release 25, attached sources/Javadoc,
+        strict doclint, and Maven Central signing isolated to the release profile.
+    - path: ".github/workflows/**"
+      instructions: |
+        Actions must use pinned commit SHAs, minimal permissions, Java 25, and batch-mode Maven.

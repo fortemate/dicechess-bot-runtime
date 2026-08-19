@@ -1,0 +1,14 @@
+pre-commit:
+  parallel: false
+  jobs:
+    - name: betterleaks
+      run: betterleaks git --pre-commit --redact --staged
+
+    - name: workflow-yaml
+      glob: ".github/workflows/*.y*ml"
+      run: actionlint -shellcheck= {staged_files}
+
+pre-push:
+  jobs:
+    - name: maven-verify
+      run: mvn --batch-mode --no-transfer-progress verify

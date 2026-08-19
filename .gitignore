@@ -1,0 +1,15 @@
+target/
+*.class
+*.log
+
+# IDEs and operating systems
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Local environment and tool overrides
+.env
+.env.*
+!.env.example
+mise.local.toml

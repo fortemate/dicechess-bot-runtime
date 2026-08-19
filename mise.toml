@@ -1,0 +1,44 @@
+[tools]
+java = "temurin-25"
+maven = "3.9.16"
+lefthook = "latest"
+betterleaks = "latest"
+actionlint = "1.7.12"
+gh = "latest"
+jq = "latest"
+
+[tasks.setup]
+description = "Install tooling and register Git hooks"
+depends = ["hook:install"]
+
+[tasks.compile]
+description = "Compile main and test sources"
+run = "mvn --batch-mode --no-transfer-progress test-compile"
+
+[tasks.test]
+description = "Run the complete test suite"
+run = "mvn --batch-mode --no-transfer-progress test"
+
+[tasks.check]
+description = "Run tests, package artifacts, and enforce Javadoc quality"
+run = "mvn --batch-mode --no-transfer-progress verify"
+
+[tasks.package]
+description = "Build the jar, sources, and Javadoc artifacts"
+run = "mvn --batch-mode --no-transfer-progress package"
+
+[tasks.docs]
+description = "Generate strict Javadoc"
+run = "mvn --batch-mode --no-transfer-progress javadoc:javadoc"
+
+[tasks.clean]
+description = "Remove build artifacts"
+run = "mvn --batch-mode --no-transfer-progress clean"
+
+[tasks."hook:install"]
+description = "Register Git hooks via lefthook"
+run = "lefthook install"
+
+[tasks."hook:run"]
+description = "Run all pre-commit hooks over tracked files"
+run = "lefthook run pre-commit --all-files"

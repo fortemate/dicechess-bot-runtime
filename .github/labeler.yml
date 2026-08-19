@@ -1,0 +1,26 @@
+enhancement:
+  - head-branch: ['^task/', '^feat/', '^feature/']
+bug:
+  - head-branch: ['^bug/', '^fix/']
+refactoring:
+  - head-branch: ['^refactor/']
+performance:
+  - head-branch: ['^perf/']
+documentation:
+  - head-branch: ['^docs/']
+  - changed-files:
+      - any-glob-to-any-file: ['README.md', '**/*.md']
+ci-cd:
+  - head-branch: ['^ci/']
+  - changed-files:
+      - any-glob-to-any-file: ['.github/**', 'mise.toml', 'lefthook.yml']
+testing:
+  - head-branch: ['^test/']
+  - changed-files:
+      - any-glob-to-any-file: ['src/test/**']
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file: ['pom.xml']
+api:
+  - changed-files:
+      - any-glob-to-any-file: ['src/main/java/**']
