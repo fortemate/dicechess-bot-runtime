@@ -7,6 +7,8 @@ updates:
       day: "tuesday"
       time: "08:00"
     open-pull-requests-limit: 5
+    assignees:
+      - "rabestro"
     labels:
       - "ci-cd"
     commit-message:
@@ -19,6 +21,8 @@ updates:
       day: "friday"
       time: "08:00"
     open-pull-requests-limit: 5
+    assignees:
+      - "rabestro"
     labels:
       - "dependencies"
       - "ci-cd"
