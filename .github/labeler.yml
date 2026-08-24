@@ -1,5 +1,5 @@
 enhancement:
-  - head-branch: ['^task/', '^feat/', '^feature/']
+  - head-branch: ['^task/', '^feat/', '^feature/', '^chore/']
 bug:
   - head-branch: ['^bug/', '^fix/']
 refactoring:
