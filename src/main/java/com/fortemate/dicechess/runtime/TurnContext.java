@@ -1,37 +1,54 @@
 package com.fortemate.dicechess.runtime;
 
 import java.util.List;
+import java.util.Objects;
 
 /**
- * What a strategy is told about the turn it must play — everything the webhook envelope's
- * {@code state} carries that a move-choosing function plausibly needs, beyond the position itself.
+ * Authenticated context for the turn a bot must play.
  *
- * @param gameId the game's id — lets a strategy keep per-game state (a search tree, a
- *     transposition table) or tag its own logs
+ * @param gameId the game's id, suitable for strategy-owned per-game state
+ * @param seat the bot's seat, exactly {@code White} or {@code Black}
+ * @param version the authoritative game-state version carried by the delivery
  * @param dfen the position plus the rolled dice for the side to move
- * @param clock the game clock as of this turn, or {@code null} for an untimed game — see {@link
- *     Clock}, whose presence is itself the "is this game timed?" answer
- * @param legalMoves every complete legal turn, each as its sequence of UCI micro-moves — the
- *     server's prefix tree, already walked root-to-leaf, so a strategy with no engine of its own
- *     can play by picking one of these directly. An empty list is a genuine auto-pass (the roll
- *     has no legal move); {@code null} means the legal moves are not known — either the envelope
- *     omitted them (past the server's inline cap) and this handler was not given a play-api base
- *     URL to fetch the fallback from, or that fetch failed
+ * @param clock the game clock, or {@code null} for an untimed game
+ * @param legalMoves every complete legal turn, each as its sequence of UCI micro-moves. An empty
+ *     list means the server is auto-passing, so no bot action is required; {@code null} means the
+ *     moves are unknown because the inline tree was absent/capped and no fallback result was
+ *     available
+ * @param mayOfferDraw whether the platform currently permits this side to offer a draw; absent,
+ *     null, or malformed wire values fail closed to {@code false}
  */
-public record TurnContext(String gameId, String dfen, Clock clock, List<List<String>> legalMoves) {
+public record TurnContext(
+		String gameId,
+		String seat,
+		long version,
+		String dfen,
+		GameClock clock,
+		List<List<String>> legalMoves,
+		boolean mayOfferDraw) {
 
-	/**
-	 * The game clock as of this turn. Present only for a timed game — {@link TurnContext#clock()} is
-	 * {@code null} when the game is untimed, so a single null check answers "is this game timed?".
-	 * Both remaining times are always present together (a game has clocks for both sides or
-	 * neither), so they are primitive; only the increment can be absent.
-	 *
-	 * @param remainingMillis milliseconds left on the mover's own clock
-	 * @param opponentRemainingMillis milliseconds left on the opponent's clock
-	 * @param incrementMillis the per-turn Fischer increment in milliseconds, credited after each
-	 *     completed turn, or {@code null} when the control has none (a sudden-death or per-move
-	 *     game). Feed it to the engine's time manager as the increment term — a {@code null}
-	 *     naturally coalesces to a zero increment
-	 */
-	public record Clock(long remainingMillis, long opponentRemainingMillis, Long incrementMillis) {}
+	/** Creates a validated context with an immutable deep copy of the legal-move paths. */
+	public TurnContext {
+		requireText(gameId, "gameId");
+		requireSeat(seat);
+		requireText(dfen, "dfen");
+		if (legalMoves != null) {
+			legalMoves = legalMoves.stream()
+					.map(path -> List.copyOf(Objects.requireNonNull(path, "legal move path must not be null")))
+					.toList();
+		}
+	}
+
+	private static void requireText(String value, String field) {
+		if (value == null || value.isBlank()) {
+			throw new IllegalArgumentException(field + " must not be blank");
+		}
+	}
+
+	private static void requireSeat(String seat) {
+		Objects.requireNonNull(seat, "seat must not be null");
+		if (!seat.equals("White") && !seat.equals("Black")) {
+			throw new IllegalArgumentException("seat must be White or Black");
+		}
+	}
 }

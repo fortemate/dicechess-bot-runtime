@@ -57,7 +57,13 @@ public final class Signatures {
 	 */
 	public static boolean verify(
 			String secret, long timestampEpochSeconds, String body, String signature, long nowEpochSeconds) {
-		if (Math.abs(nowEpochSeconds - timestampEpochSeconds) > REPLAY_WINDOW_SECONDS) {
+		long ageSeconds;
+		try {
+			ageSeconds = Math.subtractExact(nowEpochSeconds, timestampEpochSeconds);
+		} catch (ArithmeticException e) {
+			return false;
+		}
+		if (ageSeconds < -REPLAY_WINDOW_SECONDS || ageSeconds > REPLAY_WINDOW_SECONDS) {
 			return false;
 		}
 		var expected = sign(secret, timestampEpochSeconds, body);

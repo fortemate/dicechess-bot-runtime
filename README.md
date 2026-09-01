@@ -8,49 +8,125 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-lightgrey)](./LICENSE)
 
 The transport and protocol plumbing shared by Dice Chess webhook bots: HMAC-SHA256 signature
-verification, the one-time ownership handshake, and (optionally) an HTTP server for the Azure
-Functions custom-handler model. A bot author supplies one thing — a function from a
-[`TurnContext`](#usage) to a list of UCI moves — and gets a working webhook bot.
+verification, the one-time ownership handshake, typed turn and draw decisions, and (optionally) an
+HTTP server for the Azure Functions custom-handler model. A bot author supplies one
+[`BotStrategy`](#usage) and gets a working webhook bot.
 
-Every public type speaks only `String`, `Long`, `java.util.List`, and `java.util.Map`. Nothing
-library-specific crosses the boundary, so this is callable identically from Java, Kotlin, or
-Scala — see [`dicechess-bot-gcp-onnx`](https://github.com/fortemate/dicechess-bot-gcp-onnx) for an
-engine-linked consumer. It reads the position from `ctx.dfen()` and uses only the context its
-strategy needs.
+Only JDK types cross the public boundary; Gson remains an implementation detail. The API is usable
+from Java, Kotlin, and Scala — see
+[`dicechess-bot-gcp-onnx`](https://github.com/fortemate/dicechess-bot-gcp-onnx) for an engine-linked
+consumer. A strategy can read only the context it needs, whether that is the opaque DFEN, the
+server-provided legal turns, or the game clock.
 
 ## Layout
 
 | Path | Role |
 | --- | --- |
 | `Signatures` | HMAC-SHA256 sign/verify, ±5 minute replay window, constant-time comparison. |
-| `WebhookHandler` | Orchestrates one delivery: handshake, signature check, dispatch to the strategy function. Never throws. |
-| `TurnContext` | What the strategy function sees: `gameId`, `dfen`, the game `clock` (both sides' remaining time plus the per-turn Fischer increment, all in ms — the whole `clock` is `null` for an untimed game), and every complete legal turn already walked out (`null` if unknown). |
+| `BotStrategy` | One required `onTurn` callback plus safe default methods for optional decisions. |
+| `TurnContext` / `TurnAction` | The signed turn input and the exact `moves` / `offerDraw` response. |
+| `DrawDecisionContext` / `DrawAction` | A dice-free draw decision and its exact `acceptDraw` response. |
+| `GameClock` | The mover's and opponent's remaining milliseconds, plus a nullable Fischer increment. |
+| `WebhookHandler` | Orchestrates ownership verification, signature checks, typed parsing, and strategy dispatch with bounded request errors. |
 | `CustomHandlerServer` | A JDK `HttpServer` wrapper reading `FUNCTIONS_CUSTOMHANDLER_PORT` — optional; bring your own HTTP layer if you'd rather. |
 | `JsonFiles` | Generic JSON-object-of-strings file loader (an opening book, or any similar lookup table), degrades gracefully when the file is absent. |
 
 ## Usage
 
 ```java
+import com.fortemate.dicechess.runtime.BotStrategy;
 import com.fortemate.dicechess.runtime.CustomHandlerServer;
-import com.fortemate.dicechess.runtime.TurnContext;
+import com.fortemate.dicechess.runtime.TurnAction;
 import com.fortemate.dicechess.runtime.WebhookHandler;
 import java.util.List;
-import java.util.function.Function;
 
-Function<TurnContext, List<String>> strategy = ctx -> List.of("e2e4"); // your move logic
+// A lambda implements onTurn. The inherited draw callback explicitly declines.
+BotStrategy strategy = context -> new TurnAction(List.of("e2e4"));
 String secret = System.getenv("DICECHESS_WEBHOOK_SECRET");
 WebhookHandler handler = new WebhookHandler(secret, strategy);
 CustomHandlerServer.startFromEnvironment(handler);
 ```
 
-A strategy with no engine of its own can skip `dfen` entirely and just pick one path from
-`ctx.legalMoves()` — pass play-api's base URL to the other `WebhookHandler` constructor and the
-rare capped turn (the tree too large to inline) is fetched from the public
-`GET /games/{id}/moves` automatically:
+`BotStrategy` stays a functional interface because only `onTurn` is abstract. Override
+`onDrawDecision` only when the webhook is registered with the `draws` capability and has an
+intentional draw policy:
+
+```java
+import com.fortemate.dicechess.runtime.DrawAction;
+import com.fortemate.dicechess.runtime.DrawDecisionContext;
+import com.fortemate.dicechess.runtime.TurnContext;
+
+BotStrategy strategy = new BotStrategy() {
+    @Override
+    public TurnAction onTurn(TurnContext context) {
+        return new TurnAction(List.of("e2e4")); // offerDraw defaults to false
+    }
+
+    @Override
+    public DrawAction onDrawDecision(DrawDecisionContext context) {
+        return DrawAction.decline(); // accept only after an evaluated bot policy says so
+    }
+};
+```
+
+The capability controls delivery, not the Java type: without the exact lowercase `draws`
+registration capability, play-api automatically declines an opponent's offer before revealing the
+dice and sends the normal `yourTurn` delivery. With it, play-api first sends a dice-free
+`drawDecision`. The default `onDrawDecision` returns `DrawAction.decline()`, so adopting v2 never
+silently opts a bot into accepting draws. Offering a draw is a turn action and defaults to false;
+check `TurnContext.mayOfferDraw()` before requesting one.
+
+### Turn context
+
+`TurnContext` exposes the game id, the bot's seat, the monotonic state version, the opaque DFEN,
+the game clock, the flattened legal turns, and `mayOfferDraw`:
+
+- `clock` is `null` for an untimed game. Otherwise its remaining values are milliseconds from the
+  bot's point of view; `incrementMillis` is non-null only for a Fischer control.
+- `legalMoves` is a list of complete root-to-leaf UCI paths. An empty list means the server is
+  auto-passing, so no bot action is required; `null` means the server did not inline the tree or the
+  fallback fetch failed.
+- `mayOfferDraw` is fail-closed: an absent, null, or malformed optional wire field becomes `false`.
+
+A strategy with no engine of its own can pick one path directly from `legalMoves`. Pass play-api's
+base URL to the other `WebhookHandler` constructor and a capped inline tree is fetched from the
+public `GET /games/{id}/moves` endpoint automatically:
 
 ```java
 WebhookHandler handler = new WebhookHandler(secret, "https://play-api.fortemate.com", strategy);
 ```
+
+`DrawDecisionContext` deliberately contains no legal moves or dice-dependent data. It carries only
+the common game id, seat, state version, pre-roll DFEN, and clock needed to evaluate the offer.
+
+### Thread safety
+
+One `BotStrategy` instance is shared by its `WebhookHandler`. `CustomHandlerServer` uses virtual
+threads, so callbacks for different games can overlap. Keep the strategy stateless where possible;
+otherwise synchronize per-game state or use thread-safe collections. Contexts and actions are
+immutable snapshots, but any engine, cache, or search state captured by the strategy remains the
+consumer's concurrency responsibility.
+
+## Migrating from v1
+
+Version 2 is an intentional source-breaking redesign. The v1
+`Function<TurnContext, List<String>>` callback and the old `TurnContext` shape are removed; there is
+no compatibility constructor or adapter in the v2 artifact. Existing immutable v1 artifacts remain
+available for consumers that have not migrated.
+
+The minimal source change wraps the move list in a typed action:
+
+```java
+// v1
+new WebhookHandler(secret, context -> List.of("e2e4"));
+
+// v2
+new WebhookHandler(secret, context -> new TurnAction(List.of("e2e4")));
+```
+
+Then update context access for `seat`, `version`, `GameClock`, and `mayOfferDraw`, and override
+`onDrawDecision` before registering the `draws` capability. A v2 strategy that does not override the
+method safely declines draw offers if the capability is enabled accidentally.
 
 Full API docs with more examples: <https://fortemate.github.io/dicechess-bot-runtime/>.
 
@@ -58,6 +134,10 @@ Full API docs with more examples: <https://fortemate.github.io/dicechess-bot-run
 
 Published to Maven Central as `com.fortemate:dicechess-bot-runtime` — no extra repository
 configuration needed. Replace `VERSION` below with whatever the badge above currently shows.
+
+The repository currently develops the breaking line as `2.0.0-SNAPSHOT`. That snapshot version is
+development metadata, not evidence that v2 has been published; releases remain an explicit
+human-owned operation.
 
 Maven:
 
