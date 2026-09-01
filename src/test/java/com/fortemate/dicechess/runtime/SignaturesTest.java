@@ -55,4 +55,14 @@ class SignaturesTest {
 		var signature = Signatures.sign(SECRET, timestamp, body);
 		assertThat(Signatures.verify(SECRET, timestamp, body, signature, NOW)).isTrue();
 	}
+
+	@Test
+	void verifyRejectsTimestampDifferencesThatOverflowALong() {
+		var body = "{\"type\":\"yourTurn\"}";
+		var minSignature = Signatures.sign(SECRET, Long.MIN_VALUE, body);
+		var maxSignature = Signatures.sign(SECRET, Long.MAX_VALUE, body);
+
+		assertThat(Signatures.verify(SECRET, Long.MIN_VALUE, body, minSignature, 0)).isFalse();
+		assertThat(Signatures.verify(SECRET, Long.MAX_VALUE, body, maxSignature, -1)).isFalse();
+	}
 }

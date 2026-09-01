@@ -1,7 +1,13 @@
 package com.fortemate.dicechess.runtime;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.stream.JsonReader;
+import com.google.gson.stream.JsonToken;
+import java.io.IOException;
+import java.io.StringReader;
+import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -12,15 +18,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.function.Function;
+import java.util.Objects;
 
 /**
- * Orchestrates one webhook delivery: the ownership handshake, signature verification, and
- * dispatch to the bot's move-choosing function.
+ * Authenticates and dispatches DiceChess webhook deliveries to a {@link BotStrategy}.
  *
- * <p>{@link #handle} never throws — every failure mode, including an exception from the
- * strategy function, becomes a {@link Response} with an appropriate status code, so a caller
- * can always write its result straight back to the HTTP client.
+ * <p>The unsigned legacy ownership handshake is preserved. Game decisions are authenticated over
+ * the exact raw body before any decision-specific state is read. A strategy runtime exception is
+ * converted to a bounded error response and its message is never returned to the caller.
  */
 public final class WebhookHandler {
 
@@ -30,9 +35,12 @@ public final class WebhookHandler {
 	/** Header carrying the hex HMAC-SHA256 signature (see {@link Signatures}). */
 	public static final String SIGNATURE_HEADER = "x-dicechess-signature";
 
-	// Webhook-state field names reused across parsing (extracted to avoid duplicated literals).
 	private static final String FIELD_CLOCKS = "clocks";
+	private static final String FIELD_LEGAL_MOVES = "legalMoves";
 	private static final String FIELD_TIME_CONTROL = "timeControl";
+	private static final String ERROR_MALFORMED_ENVELOPE = "malformed envelope";
+	private static final String SEAT_BLACK = "Black";
+	private static final String SEAT_WHITE = "White";
 	private static final String VARIANT_FISCHER = "Fischer";
 
 	private static final Gson GSON = new Gson();
@@ -41,75 +49,121 @@ public final class WebhookHandler {
 
 	private final String secret;
 	private final String playApiBaseUrl;
-	private final Function<TurnContext, List<String>> strategy;
+	private final BotStrategy strategy;
 
 	/**
-	 * Creates a handler bound to one secret and one strategy, without the {@code GET
-	 * /games/{id}/moves} fallback — {@link TurnContext#legalMoves()} will be {@code null} on the
-	 * rare turn where the envelope's inline tree is capped.
+	 * Creates a handler without the {@code GET /games/{id}/moves} fallback.
 	 *
-	 * @param secret the webhook secret issued by the platform when the bot registered
-	 * @param strategy chooses moves for a turn: a {@link TurnContext} in, a UCI move path out
+	 * @param secret the webhook secret issued by the platform
+	 * @param strategy the decision-oriented bot strategy
 	 */
-	public WebhookHandler(String secret, Function<TurnContext, List<String>> strategy) {
+	public WebhookHandler(String secret, BotStrategy strategy) {
 		this(secret, null, strategy);
 	}
 
 	/**
-	 * Creates a handler bound to one secret and one strategy, fetching {@code GET
-	 * /games/{id}/moves} from {@code playApiBaseUrl} whenever the envelope's inline legal-move
-	 * tree is capped — see {@link TurnContext#legalMoves()}. That endpoint is public, so no
-	 * additional credential is needed.
+	 * Creates a handler that fetches {@code GET /games/{id}/moves} when a turn's inline move tree
+	 * is capped. The fallback endpoint is public and needs no additional credential.
 	 *
-	 * @param secret the webhook secret issued by the platform when the bot registered
-	 * @param playApiBaseUrl play-api's base URL (e.g. {@code https://play-api.fortemate.com}); a
-	 *     trailing slash is tolerated
-	 * @param strategy chooses moves for a turn: a {@link TurnContext} in, a UCI move path out
+	 * @param secret the webhook secret issued by the platform
+	 * @param playApiBaseUrl play-api's base URL; a trailing slash is tolerated
+	 * @param strategy the decision-oriented bot strategy
 	 */
-	public WebhookHandler(String secret, String playApiBaseUrl, Function<TurnContext, List<String>> strategy) {
-		this.secret = secret;
+	public WebhookHandler(String secret, String playApiBaseUrl, BotStrategy strategy) {
+		var requiredSecret = Objects.requireNonNull(secret, "secret must not be null");
+		if (requiredSecret.isBlank()) {
+			throw new IllegalArgumentException("secret must not be blank");
+		}
+		this.secret = requiredSecret;
 		this.playApiBaseUrl = playApiBaseUrl == null ? null : stripTrailingSlash(playApiBaseUrl);
-		this.strategy = strategy;
+		this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
 	}
 
 	/**
-	 * Handles one delivery.
+	 * Handles one webhook request.
 	 *
-	 * @param headers the request headers; lookup is case-insensitive, so any casing works
-	 * @param rawBody the raw request body, exactly as received (the signature covers these
-	 *     exact bytes)
-	 * @param nowEpochSeconds the current time, Unix epoch seconds
-	 * @return the response to send back — status 200 (handshake echoed, or moves chosen), 400
-	 *     (unparseable or unrecognized body), 401 (missing, expired, or wrong signature), or 500
-	 *     (the strategy function threw)
+	 * @param headers the request headers; lookup is case-insensitive
+	 * @param rawBody the request body exactly as received
+	 * @param nowEpochSeconds the verifier's current Unix epoch time in seconds
+	 * @return status 200 for a successful handshake/decision, 400 for a malformed or unknown
+	 *     envelope, 401 for a missing/expired/wrong signature, or 500 for a strategy failure
 	 */
 	public Response handle(Map<String, String> headers, String rawBody, long nowEpochSeconds) {
-		JsonObject envelope;
+		String type;
 		try {
-			envelope = GSON.fromJson(rawBody, JsonObject.class);
-			if (envelope == null || !envelope.has("type")) {
-				return error(400, "missing \"type\"");
-			}
-		} catch (RuntimeException e) {
+			type = readEnvelopeType(rawBody);
+		} catch (RuntimeException _) {
 			return error(400, "malformed JSON body");
 		}
 
-		String type;
+		if (type.equals("verification")) {
+			try {
+				var envelope = parseEnvelope(rawBody);
+				if (!requiredString(envelope, "type").equals(type)) {
+					return error(400, ERROR_MALFORMED_ENVELOPE);
+				}
+				return handshake(envelope);
+			} catch (RuntimeException _) {
+				return error(400, ERROR_MALFORMED_ENVELOPE);
+			}
+		}
+		if (!type.equals("yourTurn") && !type.equals("drawDecision")) {
+			return error(400, "unrecognized delivery type");
+		}
+
+		Response authenticationFailure;
 		try {
-			type = envelope.get("type").getAsString();
-		} catch (RuntimeException e) {
-			return error(400, "malformed \"type\"");
+			authenticationFailure = authenticate(headers, rawBody, nowEpochSeconds);
+		} catch (RuntimeException _) {
+			return error(401, "malformed signature headers");
+		}
+		if (authenticationFailure != null) {
+			return authenticationFailure;
 		}
 
 		try {
-			return switch (type) {
-				case "verification" -> handshake(envelope);
-				case "yourTurn" -> yourTurn(headers, rawBody, envelope, nowEpochSeconds);
-				default -> error(400, "unrecognized \"type\": " + type);
-			};
-		} catch (RuntimeException e) {
-			return error(400, "malformed envelope");
+			var envelope = parseEnvelope(rawBody);
+			if (!requiredString(envelope, "type").equals(type)) {
+				return error(400, ERROR_MALFORMED_ENVELOPE);
+			}
+			return type.equals("yourTurn") ? yourTurn(envelope) : drawDecision(envelope);
+		} catch (RuntimeException _) {
+			return error(400, ERROR_MALFORMED_ENVELOPE);
 		}
+	}
+
+	/**
+	 * Reads only play-api's canonical first-field discriminator, leaving full state parsing until
+	 * after authentication.
+	 */
+	private static String readEnvelopeType(String rawBody) {
+		try (var reader = new JsonReader(new StringReader(rawBody))) {
+			if (reader.peek() != JsonToken.BEGIN_OBJECT) {
+				throw new IllegalArgumentException("envelope must be an object");
+			}
+			reader.beginObject();
+			if (!reader.hasNext() || !reader.nextName().equals("type")) {
+				throw new IllegalArgumentException("type must be the first envelope field");
+			}
+			if (reader.peek() != JsonToken.STRING) {
+				throw new IllegalArgumentException("type must be a string");
+			}
+			var type = reader.nextString();
+			if (type.isBlank()) {
+				throw new IllegalArgumentException("type must not be blank");
+			}
+			return type;
+		} catch (IOException e) {
+			throw new IllegalArgumentException("malformed JSON body", e);
+		}
+	}
+
+	private static JsonObject parseEnvelope(String rawBody) {
+		var envelope = GSON.fromJson(rawBody, JsonObject.class);
+		if (envelope == null) {
+			throw new IllegalArgumentException("envelope must be an object");
+		}
+		return envelope;
 	}
 
 	private Response handshake(JsonObject envelope) {
@@ -119,7 +173,7 @@ public final class WebhookHandler {
 		return new Response(200, GSON.toJson(body));
 	}
 
-	private Response yourTurn(Map<String, String> headers, String rawBody, JsonObject envelope, long now) {
+	private Response authenticate(Map<String, String> headers, String rawBody, long now) {
 		var lowercased = lowercaseKeys(headers);
 		var timestampHeader = lowercased.get(TIMESTAMP_HEADER);
 		var signatureHeader = lowercased.get(SIGNATURE_HEADER);
@@ -130,74 +184,117 @@ public final class WebhookHandler {
 		long timestamp;
 		try {
 			timestamp = Long.parseLong(timestampHeader);
-		} catch (NumberFormatException e) {
+		} catch (NumberFormatException _) {
 			return error(401, "malformed timestamp header");
 		}
 
 		if (!Signatures.verify(secret, timestamp, rawBody, signatureHeader, now)) {
 			return error(401, "invalid or expired signature");
 		}
+		return null;
+	}
 
-		if (!envelope.has("gameId") || !envelope.has("seat")) {
-			return error(400, "missing gameId or seat");
-		}
-		if (!envelope.has("state") || !envelope.getAsJsonObject("state").has("dfen")) {
-			return error(400, "missing state.dfen");
-		}
-		var gameId = envelope.get("gameId").getAsString();
-		var seat = envelope.get("seat").getAsString();
-		var state = envelope.getAsJsonObject("state");
-		var dfen = state.get("dfen").getAsString();
+	private Response yourTurn(JsonObject envelope) {
+		var parsed = parseDecisionState(envelope, true);
+		var legalMoves = legalMoves(parsed.gameId(), parsed.version(), parsed.dfen(), parsed.state());
+		var mayOfferDraw = optionalBooleanTrue(parsed.state(), "mayOfferDraw");
+		var context = new TurnContext(
+				parsed.gameId(),
+				parsed.seat(),
+				parsed.version(),
+				parsed.dfen(),
+				parsed.clock(),
+				legalMoves,
+				mayOfferDraw);
 
-		// The game clock for this turn (null for an untimed game): play-api sends both sides'
-		// remaining time under "clocks" only for a timed control. The per-turn increment lives in
-		// "timeControl" and only its Fischer variant carries one — parsed defensively by
-		// fischerIncrementMillis, so a null increment on a present clock is a valid sudden-death or
-		// per-move game.
-		TurnContext.Clock clock = null;
-		if (state.has(FIELD_CLOCKS) && state.get(FIELD_CLOCKS).isJsonObject()) {
-			var clocks = state.getAsJsonObject(FIELD_CLOCKS);
-			if (clocks.has("white") && clocks.has("black")) {
-				var white = clocks.get("white").getAsLong();
-				var black = clocks.get("black").getAsLong();
-				var own = seat.equals("White") ? white : black;
-				var opponent = seat.equals("White") ? black : white;
-				clock = new TurnContext.Clock(own, opponent, fischerIncrementMillis(state));
-			}
-		}
-
-		List<List<String>> legalMoves = null;
-		if (state.has("legalMoves")) {
-			var legalMovesElement = state.get("legalMoves");
-			if (legalMovesElement.isJsonNull()) {
-				if (playApiBaseUrl != null) {
-					legalMoves = fetchLegalMoves(gameId);
-				}
-			} else {
-				legalMoves = flattenLegalMoves(legalMovesElement.getAsJsonObject());
-			}
-		}
-
-		var context = new TurnContext(gameId, dfen, clock, legalMoves);
-
-		List<String> moves;
+		TurnAction action;
 		try {
-			moves = strategy.apply(context);
-		} catch (RuntimeException e) {
-			return error(500, "strategy failed: " + e.getMessage());
+			action = strategy.onTurn(context);
+		} catch (RuntimeException _) {
+			return error(500, "strategy failed");
+		}
+		if (action == null) {
+			return error(500, "strategy returned no action");
 		}
 
 		var body = new JsonObject();
-		body.add("moves", GSON.toJsonTree(moves == null ? List.of() : moves));
+		body.add("moves", GSON.toJsonTree(action.moves()));
+		body.addProperty("offerDraw", action.offerDraw());
 		return new Response(200, GSON.toJson(body));
 	}
 
-	/**
-	 * Fetches the fallback {@code GET /games/{gameId}/moves} and flattens its tree. Best-effort:
-	 * any failure (network, non-200, malformed body) degrades to {@code null} rather than
-	 * propagating, matching {@link #handle}'s never-throws contract.
-	 */
-	private List<List<String>> fetchLegalMoves(String gameId) {
+	private Response drawDecision(JsonObject envelope) {
+		var parsed = parseDecisionState(envelope, false);
+		var drawOffer = requiredObject(parsed.state(), "drawOffer");
+		if (!requiredBoolean(drawOffer, "pending")) {
+			throw new IllegalArgumentException("draw offer is not pending");
+		}
+		var context = new DrawDecisionContext(
+				parsed.gameId(), parsed.seat(), parsed.version(), parsed.dfen(), parsed.clock());
+
+		DrawAction action;
+		try {
+			action = strategy.onDrawDecision(context);
+		} catch (RuntimeException _) {
+			return error(500, "strategy failed");
+		}
+		if (action == null) {
+			return error(500, "strategy returned no action");
+		}
+
+		var body = new JsonObject();
+		body.addProperty("acceptDraw", action.acceptDraw());
+		return new Response(200, GSON.toJson(body));
+	}
+
+	private DecisionState parseDecisionState(JsonObject envelope, boolean expectedDicePending) {
+		var gameId = requiredString(envelope, "gameId");
+		var seat = requiredSeat(envelope, "seat");
+		var state = requiredObject(envelope, "state");
+		var version = requiredLong(state, "version");
+		var dfen = requiredString(state, "dfen");
+		var activeSeat = requiredSeat(state, "activeSeat");
+		var dicePending = requiredBoolean(state, "dicePending");
+		if (!activeSeat.equals(seat) || dicePending != expectedDicePending) {
+			throw new IllegalArgumentException("delivery state does not match its decision type");
+		}
+		return new DecisionState(gameId, seat, version, dfen, state, clock(state, seat));
+	}
+
+	/** Null intentionally distinguishes unknown moves from a confirmed empty auto-pass tree. */
+	@SuppressWarnings("java:S1168")
+	private List<List<String>> legalMoves(String gameId, long version, String dfen, JsonObject state) {
+		if (!state.has(FIELD_LEGAL_MOVES)) {
+			return null;
+		}
+		var element = state.get(FIELD_LEGAL_MOVES);
+		if (element.isJsonNull()) {
+			return playApiBaseUrl == null ? null : fetchLegalMoves(gameId, version, dfen);
+		}
+		if (!element.isJsonObject()) {
+			throw new IllegalArgumentException(FIELD_LEGAL_MOVES + " must be an object or null");
+		}
+		return flattenLegalMoves(element.getAsJsonObject());
+	}
+
+	private static GameClock clock(JsonObject state, String seat) {
+		if (!state.has(FIELD_CLOCKS) || state.get(FIELD_CLOCKS).isJsonNull()) {
+			return null;
+		}
+		var clocks = requiredObject(state, FIELD_CLOCKS);
+		var white = requiredLong(clocks, "white");
+		var black = requiredLong(clocks, "black");
+		if (white < 0 || black < 0) {
+			throw new IllegalArgumentException("clock values must not be negative");
+		}
+		var own = seat.equals(SEAT_WHITE) ? white : black;
+		var opponent = seat.equals(SEAT_WHITE) ? black : white;
+		return new GameClock(own, opponent, fischerIncrementMillis(state));
+	}
+
+	/** Fetches and flattens the fallback move tree; unavailable data degrades to {@code null}. */
+	@SuppressWarnings("java:S1168")
+	private List<List<String>> fetchLegalMoves(String gameId, long expectedVersion, String expectedDfen) {
 		try {
 			var uri = URI.create(playApiBaseUrl + "/games/" + gameId + "/moves");
 			var request = HttpRequest.newBuilder(uri).timeout(FALLBACK_TIMEOUT).GET().build();
@@ -206,23 +303,26 @@ public final class WebhookHandler {
 				return null;
 			}
 			var body = GSON.fromJson(response.body(), JsonObject.class);
-			return flattenLegalMoves(body.getAsJsonObject("legalMoves"));
-		} catch (InterruptedException e) {
+			if (requiredLong(body, "version") != expectedVersion
+					|| !requiredString(body, "dfen").equals(expectedDfen)
+					|| !requiredBoolean(body, "dicePending")) {
+				return null;
+			}
+			return flattenLegalMoves(requiredObject(body, FIELD_LEGAL_MOVES));
+		} catch (InterruptedException _) {
 			Thread.currentThread().interrupt();
 			return null;
-		} catch (Exception e) {
+		} catch (Exception _) {
 			return null;
 		}
 	}
 
-	/**
-	 * Walks the server's prefix tree of UCI micro-moves (each key a move, each value the tree of
-	 * legal continuations, a leaf {@code {}} marking a complete turn) into the list of complete
-	 * root-to-leaf paths.
-	 */
 	private static List<List<String>> flattenLegalMoves(JsonObject tree) {
 		var paths = new ArrayList<List<String>>();
 		for (var entry : tree.entrySet()) {
+			if (!entry.getValue().isJsonObject()) {
+				throw new IllegalArgumentException("legal move branches must be objects");
+			}
 			var move = entry.getKey();
 			var subtree = entry.getValue().getAsJsonObject();
 			if (subtree.entrySet().isEmpty()) {
@@ -239,13 +339,6 @@ public final class WebhookHandler {
 		return paths;
 	}
 
-	/**
-	 * The per-turn Fischer increment in milliseconds from the envelope's {@code timeControl}, or
-	 * {@code null} when the control is not Fischer or the field is missing or malformed. Fully
-	 * defensive: only a numeric, non-negative {@code incrementSeconds} within {@code int} range is
-	 * accepted, so no input can throw (which {@link #handle} would turn into a 400) or overflow the
-	 * conversion to milliseconds.
-	 */
 	private static Long fischerIncrementMillis(JsonObject state) {
 		if (!state.has(FIELD_TIME_CONTROL) || !state.get(FIELD_TIME_CONTROL).isJsonObject()) {
 			return null;
@@ -259,14 +352,70 @@ public final class WebhookHandler {
 			return null;
 		}
 		try {
-			var seconds = increment.getAsLong();
-			return seconds >= 0 && seconds <= Integer.MAX_VALUE ? seconds * 1000L : null;
-		} catch (NumberFormatException e) {
-			// getAsLong() documents this throw for untrusted input. The isNumber() guard already
-			// routes to the non-throwing path in current Gson, but catching keeps the "no input can
-			// throw" contract true against Gson's documented API rather than its internals.
+			var seconds = exactLong(increment);
+			return seconds < 0 ? null : Math.multiplyExact(seconds, 1000L);
+		} catch (ArithmeticException | IllegalArgumentException _) {
 			return null;
 		}
+	}
+
+	private static String requiredString(JsonObject object, String field) {
+		var element = object.get(field);
+		if (element == null
+				|| !element.isJsonPrimitive()
+				|| !element.getAsJsonPrimitive().isString()
+				|| element.getAsString().isBlank()) {
+			throw new IllegalArgumentException(field + " must be a non-blank string");
+		}
+		return element.getAsString();
+	}
+
+	private static String requiredSeat(JsonObject object, String field) {
+		var seat = requiredString(object, field);
+		if (!seat.equals(SEAT_WHITE) && !seat.equals(SEAT_BLACK)) {
+			throw new IllegalArgumentException(field + " must be White or Black");
+		}
+		return seat;
+	}
+
+	private static JsonObject requiredObject(JsonObject object, String field) {
+		var element = object == null ? null : object.get(field);
+		if (element == null || !element.isJsonObject()) {
+			throw new IllegalArgumentException(field + " must be an object");
+		}
+		return element.getAsJsonObject();
+	}
+
+	private static long requiredLong(JsonObject object, String field) {
+		var element = object.get(field);
+		if (element == null || !element.isJsonPrimitive() || !element.getAsJsonPrimitive().isNumber()) {
+			throw new IllegalArgumentException(field + " must be an integer");
+		}
+		try {
+			return exactLong(element);
+		} catch (ArithmeticException | NumberFormatException e) {
+			throw new IllegalArgumentException(field + " must be an integer", e);
+		}
+	}
+
+	private static long exactLong(JsonElement element) {
+		return new BigDecimal(element.getAsString()).longValueExact();
+	}
+
+	private static boolean requiredBoolean(JsonObject object, String field) {
+		var element = object.get(field);
+		if (element == null || !element.isJsonPrimitive() || !element.getAsJsonPrimitive().isBoolean()) {
+			throw new IllegalArgumentException(field + " must be a boolean");
+		}
+		return element.getAsBoolean();
+	}
+
+	private static boolean optionalBooleanTrue(JsonObject object, String field) {
+		var element = object.get(field);
+		return element != null
+				&& element.isJsonPrimitive()
+				&& element.getAsJsonPrimitive().isBoolean()
+				&& element.getAsBoolean();
 	}
 
 	private static String stripTrailingSlash(String url) {
@@ -284,4 +433,7 @@ public final class WebhookHandler {
 		body.addProperty("error", message);
 		return new Response(status, GSON.toJson(body));
 	}
+
+	private record DecisionState(
+			String gameId, String seat, long version, String dfen, JsonObject state, GameClock clock) {}
 }
