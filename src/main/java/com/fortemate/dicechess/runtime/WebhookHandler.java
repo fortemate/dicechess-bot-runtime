@@ -36,7 +36,11 @@ public final class WebhookHandler {
 	public static final String SIGNATURE_HEADER = "x-dicechess-signature";
 
 	private static final String FIELD_CLOCKS = "clocks";
+	private static final String FIELD_LEGAL_MOVES = "legalMoves";
 	private static final String FIELD_TIME_CONTROL = "timeControl";
+	private static final String ERROR_MALFORMED_ENVELOPE = "malformed envelope";
+	private static final String SEAT_BLACK = "Black";
+	private static final String SEAT_WHITE = "White";
 	private static final String VARIANT_FISCHER = "Fischer";
 
 	private static final Gson GSON = new Gson();
@@ -88,7 +92,7 @@ public final class WebhookHandler {
 		String type;
 		try {
 			type = readEnvelopeType(rawBody);
-		} catch (RuntimeException e) {
+		} catch (RuntimeException _) {
 			return error(400, "malformed JSON body");
 		}
 
@@ -96,11 +100,11 @@ public final class WebhookHandler {
 			try {
 				var envelope = parseEnvelope(rawBody);
 				if (!requiredString(envelope, "type").equals(type)) {
-					return error(400, "malformed envelope");
+					return error(400, ERROR_MALFORMED_ENVELOPE);
 				}
 				return handshake(envelope);
-			} catch (RuntimeException e) {
-				return error(400, "malformed envelope");
+			} catch (RuntimeException _) {
+				return error(400, ERROR_MALFORMED_ENVELOPE);
 			}
 		}
 		if (!type.equals("yourTurn") && !type.equals("drawDecision")) {
@@ -110,7 +114,7 @@ public final class WebhookHandler {
 		Response authenticationFailure;
 		try {
 			authenticationFailure = authenticate(headers, rawBody, nowEpochSeconds);
-		} catch (RuntimeException e) {
+		} catch (RuntimeException _) {
 			return error(401, "malformed signature headers");
 		}
 		if (authenticationFailure != null) {
@@ -120,11 +124,11 @@ public final class WebhookHandler {
 		try {
 			var envelope = parseEnvelope(rawBody);
 			if (!requiredString(envelope, "type").equals(type)) {
-				return error(400, "malformed envelope");
+				return error(400, ERROR_MALFORMED_ENVELOPE);
 			}
 			return type.equals("yourTurn") ? yourTurn(envelope) : drawDecision(envelope);
-		} catch (RuntimeException e) {
-			return error(400, "malformed envelope");
+		} catch (RuntimeException _) {
+			return error(400, ERROR_MALFORMED_ENVELOPE);
 		}
 	}
 
@@ -180,7 +184,7 @@ public final class WebhookHandler {
 		long timestamp;
 		try {
 			timestamp = Long.parseLong(timestampHeader);
-		} catch (NumberFormatException e) {
+		} catch (NumberFormatException _) {
 			return error(401, "malformed timestamp header");
 		}
 
@@ -206,7 +210,7 @@ public final class WebhookHandler {
 		TurnAction action;
 		try {
 			action = strategy.onTurn(context);
-		} catch (RuntimeException e) {
+		} catch (RuntimeException _) {
 			return error(500, "strategy failed");
 		}
 		if (action == null) {
@@ -231,7 +235,7 @@ public final class WebhookHandler {
 		DrawAction action;
 		try {
 			action = strategy.onDrawDecision(context);
-		} catch (RuntimeException e) {
+		} catch (RuntimeException _) {
 			return error(500, "strategy failed");
 		}
 		if (action == null) {
@@ -257,16 +261,18 @@ public final class WebhookHandler {
 		return new DecisionState(gameId, seat, version, dfen, state, clock(state, seat));
 	}
 
+	/** Null intentionally distinguishes unknown moves from a confirmed empty auto-pass tree. */
+	@SuppressWarnings("java:S1168")
 	private List<List<String>> legalMoves(String gameId, long version, String dfen, JsonObject state) {
-		if (!state.has("legalMoves")) {
+		if (!state.has(FIELD_LEGAL_MOVES)) {
 			return null;
 		}
-		var element = state.get("legalMoves");
+		var element = state.get(FIELD_LEGAL_MOVES);
 		if (element.isJsonNull()) {
 			return playApiBaseUrl == null ? null : fetchLegalMoves(gameId, version, dfen);
 		}
 		if (!element.isJsonObject()) {
-			throw new IllegalArgumentException("legalMoves must be an object or null");
+			throw new IllegalArgumentException(FIELD_LEGAL_MOVES + " must be an object or null");
 		}
 		return flattenLegalMoves(element.getAsJsonObject());
 	}
@@ -281,12 +287,13 @@ public final class WebhookHandler {
 		if (white < 0 || black < 0) {
 			throw new IllegalArgumentException("clock values must not be negative");
 		}
-		var own = seat.equals("White") ? white : black;
-		var opponent = seat.equals("White") ? black : white;
+		var own = seat.equals(SEAT_WHITE) ? white : black;
+		var opponent = seat.equals(SEAT_WHITE) ? black : white;
 		return new GameClock(own, opponent, fischerIncrementMillis(state));
 	}
 
-	/** Fetches and flattens the fallback move tree; every failure degrades to {@code null}. */
+	/** Fetches and flattens the fallback move tree; unavailable data degrades to {@code null}. */
+	@SuppressWarnings("java:S1168")
 	private List<List<String>> fetchLegalMoves(String gameId, long expectedVersion, String expectedDfen) {
 		try {
 			var uri = URI.create(playApiBaseUrl + "/games/" + gameId + "/moves");
@@ -301,11 +308,11 @@ public final class WebhookHandler {
 					|| !requiredBoolean(body, "dicePending")) {
 				return null;
 			}
-			return flattenLegalMoves(requiredObject(body, "legalMoves"));
-		} catch (InterruptedException e) {
+			return flattenLegalMoves(requiredObject(body, FIELD_LEGAL_MOVES));
+		} catch (InterruptedException _) {
 			Thread.currentThread().interrupt();
 			return null;
-		} catch (Exception e) {
+		} catch (Exception _) {
 			return null;
 		}
 	}
@@ -347,7 +354,7 @@ public final class WebhookHandler {
 		try {
 			var seconds = exactLong(increment);
 			return seconds < 0 ? null : Math.multiplyExact(seconds, 1000L);
-		} catch (ArithmeticException | IllegalArgumentException e) {
+		} catch (ArithmeticException | IllegalArgumentException _) {
 			return null;
 		}
 	}
@@ -365,7 +372,7 @@ public final class WebhookHandler {
 
 	private static String requiredSeat(JsonObject object, String field) {
 		var seat = requiredString(object, field);
-		if (!seat.equals("White") && !seat.equals("Black")) {
+		if (!seat.equals(SEAT_WHITE) && !seat.equals(SEAT_BLACK)) {
 			throw new IllegalArgumentException(field + " must be White or Black");
 		}
 		return seat;

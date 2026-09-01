@@ -60,7 +60,7 @@ public final class Signatures {
 		long ageSeconds;
 		try {
 			ageSeconds = Math.subtractExact(nowEpochSeconds, timestampEpochSeconds);
-		} catch (ArithmeticException e) {
+		} catch (ArithmeticException _) {
 			return false;
 		}
 		if (ageSeconds < -REPLAY_WINDOW_SECONDS || ageSeconds > REPLAY_WINDOW_SECONDS) {

@@ -465,7 +465,8 @@ class WebhookHandlerTest {
 		var action = new TurnAction(moves);
 		moves.add("g1f3");
 		assertThat(action.moves()).containsExactly("e2e4");
-		assertThatThrownBy(() -> action.moves().add("g1f3")).isInstanceOf(UnsupportedOperationException.class);
+		var immutableMoves = action.moves();
+		assertThatThrownBy(() -> immutableMoves.add("g1f3")).isInstanceOf(UnsupportedOperationException.class);
 
 		var path = new ArrayList<>(List.of("e2e4"));
 		var paths = new ArrayList<List<String>>();
@@ -474,7 +475,8 @@ class WebhookHandlerTest {
 		path.add("g1f3");
 		paths.clear();
 		assertThat(context.legalMoves()).containsExactly(List.of("e2e4"));
-		assertThatThrownBy(() -> context.legalMoves().getFirst().add("g1f3"))
+		var immutablePath = context.legalMoves().getFirst();
+		assertThatThrownBy(() -> immutablePath.add("g1f3"))
 				.isInstanceOf(UnsupportedOperationException.class);
 	}
 
