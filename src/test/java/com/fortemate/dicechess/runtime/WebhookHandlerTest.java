@@ -537,7 +537,7 @@ class WebhookHandlerTest {
 		assertThat(ctx).isNotNull();
 		assertThat(ctx.gameId()).isEqualTo("3f0e2b4c-9a17-4d6e-8b52-1c7d9e0f4a68");
 		assertThat(ctx.seat()).isEqualTo("White");
-		assertThat(ctx.version()).isEqualTo(0L);
+		assertThat(ctx.version()).isZero();
 		assertThat(ctx.dfen()).isEqualTo("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
 		assertThat(ctx.decisionId()).isEqualTo("double_01K4F4Y7M8R2");
 		assertThat(ctx.currency()).isEqualTo("PLAY_CREDIT");

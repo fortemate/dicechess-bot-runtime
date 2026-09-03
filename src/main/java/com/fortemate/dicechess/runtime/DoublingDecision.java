@@ -10,6 +10,12 @@ public sealed interface DoublingDecision permits DoublingDecision.Offer, Doublin
 	/** Regular expression pattern for a valid decision id. */
 	Pattern ID_PATTERN = Pattern.compile("^double_[A-Za-z0-9_-]+$");
 
+	/** Constant decision kind for an offer opportunity. */
+	String KIND_OFFER = "offer";
+
+	/** Constant decision kind for an offer response. */
+	String KIND_RESPONSE = "response";
+
 	/**
 	 * Returns the opaque decision identifier spanning the doubling episode.
 	 *
@@ -47,9 +53,6 @@ public sealed interface DoublingDecision permits DoublingDecision.Offer, Doublin
 	 */
 	record Offer(String id, String seat, long proposedStake) implements DoublingDecision {
 
-		/** Constant decision kind for an offer opportunity. */
-		public static final String KIND = "offer";
-
 		/**
 		 * Creates a validated offer decision.
 		 */
@@ -61,7 +64,7 @@ public sealed interface DoublingDecision permits DoublingDecision.Offer, Doublin
 
 		@Override
 		public String kind() {
-			return KIND;
+			return KIND_OFFER;
 		}
 	}
 
@@ -74,9 +77,6 @@ public sealed interface DoublingDecision permits DoublingDecision.Offer, Doublin
 	 * @param proposedStake the proposed stake if accepted
 	 */
 	record Response(String id, String seat, String offeredBy, long proposedStake) implements DoublingDecision {
-
-		/** Constant decision kind for an offer response. */
-		public static final String KIND = "response";
 
 		/**
 		 * Creates a validated response decision.
@@ -93,7 +93,7 @@ public sealed interface DoublingDecision permits DoublingDecision.Offer, Doublin
 
 		@Override
 		public String kind() {
-			return KIND;
+			return KIND_RESPONSE;
 		}
 	}
 

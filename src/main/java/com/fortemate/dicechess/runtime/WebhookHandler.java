@@ -38,7 +38,10 @@ public final class WebhookHandler {
 	private static final String FIELD_CLOCKS = "clocks";
 	private static final String FIELD_LEGAL_MOVES = "legalMoves";
 	private static final String FIELD_TIME_CONTROL = "timeControl";
+	private static final String FIELD_CUBE_OWNER = "cubeOwner";
 	private static final String ERROR_MALFORMED_ENVELOPE = "malformed envelope";
+	private static final String ERROR_STRATEGY_FAILED = "strategy failed";
+	private static final String ERROR_STRATEGY_NO_ACTION = "strategy returned no action";
 	private static final String SEAT_BLACK = "Black";
 	private static final String SEAT_WHITE = "White";
 	private static final String VARIANT_FISCHER = "Fischer";
@@ -220,10 +223,10 @@ public final class WebhookHandler {
 		try {
 			action = strategy.onTurn(context);
 		} catch (RuntimeException _) {
-			return error(500, "strategy failed");
+			return error(500, ERROR_STRATEGY_FAILED);
 		}
 		if (action == null) {
-			return error(500, "strategy returned no action");
+			return error(500, ERROR_STRATEGY_NO_ACTION);
 		}
 
 		var body = new JsonObject();
@@ -245,10 +248,10 @@ public final class WebhookHandler {
 		try {
 			action = strategy.onDrawDecision(context);
 		} catch (RuntimeException _) {
-			return error(500, "strategy failed");
+			return error(500, ERROR_STRATEGY_FAILED);
 		}
 		if (action == null) {
-			return error(500, "strategy returned no action");
+			return error(500, ERROR_STRATEGY_NO_ACTION);
 		}
 
 		var body = new JsonObject();
@@ -268,10 +271,10 @@ public final class WebhookHandler {
 		try {
 			action = strategy.onDoubleOpportunity(context);
 		} catch (RuntimeException _) {
-			return error(500, "strategy failed");
+			return error(500, ERROR_STRATEGY_FAILED);
 		}
 		if (action == null) {
-			return error(500, "strategy returned no action");
+			return error(500, ERROR_STRATEGY_NO_ACTION);
 		}
 
 		var body = new JsonObject();
@@ -292,10 +295,10 @@ public final class WebhookHandler {
 		try {
 			action = strategy.onDoubleDecision(context);
 		} catch (RuntimeException _) {
-			return error(500, "strategy failed");
+			return error(500, ERROR_STRATEGY_FAILED);
 		}
 		if (action == null) {
-			return error(500, "strategy returned no action");
+			return error(500, ERROR_STRATEGY_NO_ACTION);
 		}
 
 		var body = new JsonObject();
@@ -489,12 +492,12 @@ public final class WebhookHandler {
 		}
 		String cubeOwner;
 		if (cubeValue == 1) {
-			if (doubling.has("cubeOwner") && !doubling.get("cubeOwner").isJsonNull()) {
+			if (doubling.has(FIELD_CUBE_OWNER) && !doubling.get(FIELD_CUBE_OWNER).isJsonNull()) {
 				throw new IllegalArgumentException("centered cube (cubeValue == 1) must have null cubeOwner");
 			}
 			cubeOwner = null;
 		} else {
-			cubeOwner = requiredSeat(doubling, "cubeOwner");
+			cubeOwner = requiredSeat(doubling, FIELD_CUBE_OWNER);
 		}
 		var maximumMultiplier = (int) requiredLong(doubling, "maximumMultiplier");
 		if (!DoublingState.VALID_MULTIPLIERS.contains(maximumMultiplier)) {
@@ -527,9 +530,9 @@ public final class WebhookHandler {
 		if (proposedStake != currentStake * 2) {
 			throw new IllegalArgumentException("proposedStake must be currentStake * 2");
 		}
-		if (kind.equals(DoublingDecision.Offer.KIND)) {
+		if (kind.equals(DoublingDecision.KIND_OFFER)) {
 			return new DoublingDecision.Offer(id, seat, proposedStake);
-		} else if (kind.equals(DoublingDecision.Response.KIND)) {
+		} else if (kind.equals(DoublingDecision.KIND_RESPONSE)) {
 			var offeredBy = requiredSeat(object, "offeredBy");
 			return new DoublingDecision.Response(id, seat, offeredBy, proposedStake);
 		} else {
