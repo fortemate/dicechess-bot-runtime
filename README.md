@@ -23,6 +23,7 @@ server-provided legal turns, or the game clock.
 | Path | Role |
 | --- | --- |
 | `Signatures` | HMAC-SHA256 sign/verify, ±5 minute replay window, constant-time comparison. |
+| `WebhookKeys` | Immutable active and pending secret configuration for zero-downtime rotation. |
 | `BotStrategy` | One required `onTurn` callback plus safe default methods for optional decisions. |
 | `TurnContext` / `TurnAction` | The signed turn input and the exact `moves` / `offerDraw` response. |
 | `DrawDecisionContext` / `DrawAction` | A dice-free draw decision and its exact `acceptDraw` response. |
@@ -41,12 +42,13 @@ import com.fortemate.dicechess.runtime.BotStrategy;
 import com.fortemate.dicechess.runtime.CustomHandlerServer;
 import com.fortemate.dicechess.runtime.TurnAction;
 import com.fortemate.dicechess.runtime.WebhookHandler;
+import com.fortemate.dicechess.runtime.WebhookKeys;
 import java.util.List;
 
 // A lambda implements onTurn. The inherited draw callback explicitly declines.
 BotStrategy strategy = context -> new TurnAction(List.of("e2e4"));
-String secret = System.getenv("DICECHESS_WEBHOOK_SECRET");
-WebhookHandler handler = new WebhookHandler(secret, strategy);
+WebhookKeys keys = WebhookKeys.fromEnvironment();
+WebhookHandler handler = new WebhookHandler(keys, strategy);
 CustomHandlerServer.startFromEnvironment(handler);
 ```
 
@@ -144,6 +146,78 @@ WebhookHandler handler = new WebhookHandler(secret, "https://play-api.fortemate.
 `DrawDecisionContext` deliberately contains no legal moves or dice-dependent data. It carries only
 the common game id, seat, state version, pre-roll DFEN, and clock needed to evaluate the offer.
 
+### Webhook key management and zero-downtime rotation (ADR 004)
+
+`dicechess-play-api` implements a two-phase staged webhook management contract (ADR 004). Endpoints
+configure secrets via `WebhookKeys`, which supports three immutable operational states:
+
+1. **Pending only (`WebhookKeys.pendingOnly`):** Initial registration of an unverified endpoint.
+   The endpoint answers version-2 verification challenges with the candidate secret.
+2. **Active and pending (`WebhookKeys.activeAndPending`):** Staged rotation during which
+   activation challenges are verified against the pending key only, while ongoing gameplay
+   deliveries (`yourTurn`, `drawDecision`, `doubleOpportunity`, `doubleDecision`) are accepted
+   under either key.
+3. **Active only (`WebhookKeys.activeOnly`):** Steady-state operation after successful cutover.
+
+#### How verification v2 works
+
+During activation, `play-api` sends a signed verification challenge declaring `"version": 2`:
+
+```json
+{
+  "type": "verification",
+  "version": 2,
+  "bot": { "team": "acme", "name": "greedy" },
+  "setupId": "whs_01K4EXAMPLE",
+  "revision": "whrev_01K4SETUP",
+  "nonce": "<unpadded base64url carrying >= 128 random bits>"
+}
+```
+
+The runtime verifies the request signature and timestamp freshness against the **pending key only**.
+Upon successful verification, it returns:
+
+```json
+{
+  "nonce": "<echoed nonce>",
+  "proof": "<lowercase hex HMAC-SHA256>"
+}
+```
+
+The proof is calculated independently over the exact raw request bytes:
+`HMAC-SHA256(pendingSecretUtf8, ASCII("dicechess-webhook-activate-v2\n") || rawRequestBodyUtf8)`.
+JSON reserialization is never used for either signature verification or proof bytes.
+
+#### Deployment and rotation lifecycle
+
+- **First registration:** Stage the candidate secret as `DICECHESS_WEBHOOK_NEXT_SECRET`
+  (`pendingOnly`). Trigger setup creation in `play-api`. When the verification challenge succeeds,
+  read back authoritative state via `GET /me/bots/{team}/{name}/webhook` (or `/admin/...`). Once
+  confirmed, promote the secret to `DICECHESS_WEBHOOK_SECRET` (`activeOnly`).
+- **URL replacement:** Replacing an endpoint URL changes the trust boundary and always issues a fresh
+  secret. Stage the candidate secret on the new URL as `pendingOnly` or `activeAndPending`, trigger
+  activation, verify authoritative readback, and promote.
+- **Zero-downtime same-URL rotation:**
+  1. **Stage:** Configure both `DICECHESS_WEBHOOK_SECRET` (current active) and
+     `DICECHESS_WEBHOOK_NEXT_SECRET` (new candidate) on the serving bot (`activeAndPending`).
+  2. **Verify fleet:** Ensure all serving instances across the fleet are running the dual-key configuration.
+  3. **Activate:** Issue the activation request in `play-api`. Any fleet node can verify the challenge
+     with the pending key and return the valid proof.
+  4. **Authoritative readback:** Call `GET .../webhook` to confirm the new `registrationId` and revision
+     commit. If activation failed or the response was ambiguous, the old active key remains usable
+     for all deliveries.
+  5. **Promote:** Promote `DICECHESS_WEBHOOK_NEXT_SECRET` to `DICECHESS_WEBHOOK_SECRET` and remove
+     `DICECHESS_WEBHOOK_NEXT_SECRET` across the fleet.
+- **Single-key limitation:** Endpoints configured with only a single secret cannot perform safe
+  same-URL session rotation without downtime; upgrading to `WebhookKeys` is required.
+- **No automatic promotion:** The runtime never mutates or promotes keys automatically upon
+  answering a challenge. Key promotion remains an explicit operator configuration step following
+  authoritative server readback.
+- **Constant-time dual-key checks:** When both keys are configured, gameplay delivery verification
+  evaluates both keys using constant-time comparison without early termination to eliminate timing oracles.
+- **Redaction:** Secrets, signatures, response proofs, and raw authenticated payloads are never exposed
+  in `toString()`, exceptions, error responses, or logs.
+
 ### Thread safety
 
 One `BotStrategy` instance is shared by its `WebhookHandler`. `CustomHandlerServer` uses virtual
@@ -169,9 +243,21 @@ new WebhookHandler(secret, context -> List.of("e2e4"));
 new WebhookHandler(secret, context -> new TurnAction(List.of("e2e4")));
 ```
 
+Or with dual-key rotation support:
+
+```java
+WebhookKeys keys = WebhookKeys.fromEnvironment();
+new WebhookHandler(keys, context -> new TurnAction(List.of("e2e4")));
+```
+
 Then update context access for `seat`, `version`, `GameClock`, and `mayOfferDraw`, and override
 `onDrawDecision` before registering the `draws` capability. A v2 strategy that does not override the
 method safely declines draw offers if the capability is enabled accidentally.
+
+One-key endpoints cannot use safe same-URL session rotation without downtime; adopt `WebhookKeys`
+with `DICECHESS_WEBHOOK_SECRET` and `DICECHESS_WEBHOOK_NEXT_SECRET` for zero-downtime rotation.
+Existing version-1 and version-absent `verification` requests retain the legacy unsigned exact-nonce
+echo behavior so bot-token registration remains backward compatible.
 
 Full API docs with more examples: <https://fortemate.github.io/dicechess-bot-runtime/>.
 

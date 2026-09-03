@@ -76,6 +76,92 @@ class CustomHandlerServerTest {
 		}
 	}
 
+	@Test
+	void pendingOnlyVerificationV2RunsOverRealHttp() throws Exception {
+		var keys = WebhookKeys.pendingOnly(VerificationV2Vectors.CANONICAL_SECRET);
+		var handler = new WebhookHandler(keys, context -> new TurnAction(List.of()));
+		var server = CustomHandlerServer.start(0, "/api/webhook", handler);
+		try {
+			var uri = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/api/webhook");
+			var client = HttpClient.newHttpClient();
+
+			var now = System.currentTimeMillis() / 1000;
+			var signature = Signatures.sign(VerificationV2Vectors.CANONICAL_SECRET, now, VerificationV2Vectors.CANONICAL_RAW_BODY);
+			var expectedProof = Signatures.activationProof(VerificationV2Vectors.CANONICAL_SECRET, VerificationV2Vectors.CANONICAL_RAW_BODY);
+
+			var request = HttpRequest.newBuilder(uri)
+					.header(WebhookHandler.TIMESTAMP_HEADER, String.valueOf(now))
+					.header(WebhookHandler.SIGNATURE_HEADER, signature)
+					.POST(HttpRequest.BodyPublishers.ofString(VerificationV2Vectors.CANONICAL_RAW_BODY))
+					.build();
+
+			var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+			assertThat(response.statusCode()).isEqualTo(200);
+			assertThat(response.body()).isEqualTo(
+					"{\"nonce\":\"" + VerificationV2Vectors.CANONICAL_NONCE + "\",\"proof\":\"" + expectedProof + "\"}");
+		} finally {
+			server.stop(0);
+		}
+	}
+
+	@Test
+	void dualKeyRotationRunsOverRealHttp() throws Exception {
+		var activeSecret = "active-secret-1234567890abcdef1234567890abcdef1234567890abcdef1234";
+		var pendingSecret = VerificationV2Vectors.CANONICAL_SECRET;
+		var keys = WebhookKeys.activeAndPending(activeSecret, pendingSecret);
+		var handler = new WebhookHandler(keys, context -> new TurnAction(List.of("e2e4")));
+		var server = CustomHandlerServer.start(0, "/api/webhook", handler);
+		try {
+			var uri = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/api/webhook");
+			var client = HttpClient.newHttpClient();
+
+			var now = System.currentTimeMillis() / 1000;
+			var v2Sig = Signatures.sign(pendingSecret, now, VerificationV2Vectors.CANONICAL_RAW_BODY);
+			var expectedProof = Signatures.activationProof(pendingSecret, VerificationV2Vectors.CANONICAL_RAW_BODY);
+
+			// 1. Activation challenge with pending key
+			var v2Request = HttpRequest.newBuilder(uri)
+					.header(WebhookHandler.TIMESTAMP_HEADER, String.valueOf(now))
+					.header(WebhookHandler.SIGNATURE_HEADER, v2Sig)
+					.POST(HttpRequest.BodyPublishers.ofString(VerificationV2Vectors.CANONICAL_RAW_BODY))
+					.build();
+			var v2Response = client.send(v2Request, HttpResponse.BodyHandlers.ofString());
+			assertThat(v2Response.statusCode()).isEqualTo(200);
+			assertThat(v2Response.body()).isEqualTo(
+					"{\"nonce\":\"" + VerificationV2Vectors.CANONICAL_NONCE + "\",\"proof\":\"" + expectedProof + "\"}");
+
+			// 2. Gameplay delivery signed with active key
+			var turnBody = "{\"type\":\"yourTurn\",\"gameId\":\"g1\",\"seat\":\"White\",\"state\":{\"version\":1,\"dfen\":\"x\",\"activeSeat\":\"White\",\"dicePending\":true}}";
+			var activeTurnReq = HttpRequest.newBuilder(uri)
+					.header(WebhookHandler.TIMESTAMP_HEADER, String.valueOf(now))
+					.header(WebhookHandler.SIGNATURE_HEADER, Signatures.sign(activeSecret, now, turnBody))
+					.POST(HttpRequest.BodyPublishers.ofString(turnBody))
+					.build();
+			var activeTurnResp = client.send(activeTurnReq, HttpResponse.BodyHandlers.ofString());
+			assertThat(activeTurnResp.statusCode()).isEqualTo(200);
+
+			// 3. Gameplay delivery signed with pending key
+			var pendingTurnReq = HttpRequest.newBuilder(uri)
+					.header(WebhookHandler.TIMESTAMP_HEADER, String.valueOf(now))
+					.header(WebhookHandler.SIGNATURE_HEADER, Signatures.sign(pendingSecret, now, turnBody))
+					.POST(HttpRequest.BodyPublishers.ofString(turnBody))
+					.build();
+			var pendingTurnResp = client.send(pendingTurnReq, HttpResponse.BodyHandlers.ofString());
+			assertThat(pendingTurnResp.statusCode()).isEqualTo(200);
+
+			// 4. Gameplay delivery signed with invalid secret is rejected
+			var invalidTurnReq = HttpRequest.newBuilder(uri)
+					.header(WebhookHandler.TIMESTAMP_HEADER, String.valueOf(now))
+					.header(WebhookHandler.SIGNATURE_HEADER, Signatures.sign("invalid-key", now, turnBody))
+					.POST(HttpRequest.BodyPublishers.ofString(turnBody))
+					.build();
+			var invalidTurnResp = client.send(invalidTurnReq, HttpResponse.BodyHandlers.ofString());
+			assertThat(invalidTurnResp.statusCode()).isEqualTo(401);
+		} finally {
+			server.stop(0);
+		}
+	}
+
 	private static HttpResponse<String> post(HttpClient client, URI uri, String body, Long timestamp) throws Exception {
 		var request = HttpRequest.newBuilder(uri);
 		if (timestamp != null) {
