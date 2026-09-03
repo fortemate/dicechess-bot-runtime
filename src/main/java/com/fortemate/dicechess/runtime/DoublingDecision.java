@@ -1,0 +1,105 @@
+package com.fortemate.dicechess.runtime;
+
+import java.util.regex.Pattern;
+
+/**
+ * An authoritative stake-doubling decision awaiting bot action.
+ */
+public sealed interface DoublingDecision permits DoublingDecision.Offer, DoublingDecision.Response {
+
+	/** Regular expression pattern for a valid decision id. */
+	Pattern ID_PATTERN = Pattern.compile("^double_[A-Za-z0-9_-]+$");
+
+	/** Constant decision kind for an offer opportunity. */
+	String KIND_OFFER = "offer";
+
+	/** Constant decision kind for an offer response. */
+	String KIND_RESPONSE = "response";
+
+	/**
+	 * Returns the opaque decision identifier spanning the doubling episode.
+	 *
+	 * @return the decision id
+	 */
+	String id();
+
+	/**
+	 * Returns the decision kind, exactly {@code offer} or {@code response}.
+	 *
+	 * @return the decision kind
+	 */
+	String kind();
+
+	/**
+	 * Returns the seat required to answer this decision, exactly {@code White} or {@code Black}.
+	 *
+	 * @return the decision seat
+	 */
+	String seat();
+
+	/**
+	 * Returns the proposed doubled stake in whole PLAY_CREDIT units.
+	 *
+	 * @return the proposed stake
+	 */
+	long proposedStake();
+
+	/**
+	 * An offer decision awaiting the turn owner's choice to offer a double or roll.
+	 *
+	 * @param id the decision id
+	 * @param seat the turn owner's seat, exactly {@code White} or {@code Black}
+	 * @param proposedStake the proposed stake if doubled
+	 */
+	record Offer(String id, String seat, long proposedStake) implements DoublingDecision {
+
+		/**
+		 * Creates a validated offer decision.
+		 */
+		public Offer {
+			requireDecisionId(id);
+			Validations.requireSeat(seat);
+			Validations.requirePositive(proposedStake, "proposedStake");
+		}
+
+		@Override
+		public String kind() {
+			return KIND_OFFER;
+		}
+	}
+
+	/**
+	 * A response decision awaiting the responder's choice to accept or decline an offer.
+	 *
+	 * @param id the decision id
+	 * @param seat the responder's seat, exactly {@code White} or {@code Black}
+	 * @param offeredBy the seat that made the double offer, exactly {@code White} or {@code Black}
+	 * @param proposedStake the proposed stake if accepted
+	 */
+	record Response(String id, String seat, String offeredBy, long proposedStake) implements DoublingDecision {
+
+		/**
+		 * Creates a validated response decision.
+		 */
+		public Response {
+			requireDecisionId(id);
+			Validations.requireSeat(seat);
+			Validations.requireSeat(offeredBy, "offeredBy");
+			Validations.requirePositive(proposedStake, "proposedStake");
+			if (seat.equals(offeredBy)) {
+				throw new IllegalArgumentException("seat and offeredBy must be opposite seats");
+			}
+		}
+
+		@Override
+		public String kind() {
+			return KIND_RESPONSE;
+		}
+	}
+
+	private static void requireDecisionId(String id) {
+		if (id == null || !ID_PATTERN.matcher(id).matches()) {
+			throw new IllegalArgumentException("id must match pattern ^double_[A-Za-z0-9_-]+$");
+		}
+	}
+}

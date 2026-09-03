@@ -38,7 +38,10 @@ public final class WebhookHandler {
 	private static final String FIELD_CLOCKS = "clocks";
 	private static final String FIELD_LEGAL_MOVES = "legalMoves";
 	private static final String FIELD_TIME_CONTROL = "timeControl";
+	private static final String FIELD_CUBE_OWNER = "cubeOwner";
 	private static final String ERROR_MALFORMED_ENVELOPE = "malformed envelope";
+	private static final String ERROR_STRATEGY_FAILED = "strategy failed";
+	private static final String ERROR_STRATEGY_NO_ACTION = "strategy returned no action";
 	private static final String SEAT_BLACK = "Black";
 	private static final String SEAT_WHITE = "White";
 	private static final String VARIANT_FISCHER = "Fischer";
@@ -107,7 +110,10 @@ public final class WebhookHandler {
 				return error(400, ERROR_MALFORMED_ENVELOPE);
 			}
 		}
-		if (!type.equals("yourTurn") && !type.equals("drawDecision")) {
+		if (!type.equals("yourTurn")
+				&& !type.equals("drawDecision")
+				&& !type.equals("doubleOpportunity")
+				&& !type.equals("doubleDecision")) {
 			return error(400, "unrecognized delivery type");
 		}
 
@@ -126,7 +132,13 @@ public final class WebhookHandler {
 			if (!requiredString(envelope, "type").equals(type)) {
 				return error(400, ERROR_MALFORMED_ENVELOPE);
 			}
-			return type.equals("yourTurn") ? yourTurn(envelope) : drawDecision(envelope);
+			return switch (type) {
+				case "yourTurn" -> yourTurn(envelope);
+				case "drawDecision" -> drawDecision(envelope);
+				case "doubleOpportunity" -> doubleOpportunity(envelope);
+				case "doubleDecision" -> doubleDecision(envelope);
+				default -> error(400, "unrecognized delivery type");
+			};
 		} catch (RuntimeException _) {
 			return error(400, ERROR_MALFORMED_ENVELOPE);
 		}
@@ -211,10 +223,10 @@ public final class WebhookHandler {
 		try {
 			action = strategy.onTurn(context);
 		} catch (RuntimeException _) {
-			return error(500, "strategy failed");
+			return error(500, ERROR_STRATEGY_FAILED);
 		}
 		if (action == null) {
-			return error(500, "strategy returned no action");
+			return error(500, ERROR_STRATEGY_NO_ACTION);
 		}
 
 		var body = new JsonObject();
@@ -236,14 +248,62 @@ public final class WebhookHandler {
 		try {
 			action = strategy.onDrawDecision(context);
 		} catch (RuntimeException _) {
-			return error(500, "strategy failed");
+			return error(500, ERROR_STRATEGY_FAILED);
 		}
 		if (action == null) {
-			return error(500, "strategy returned no action");
+			return error(500, ERROR_STRATEGY_NO_ACTION);
 		}
 
 		var body = new JsonObject();
 		body.addProperty("acceptDraw", action.acceptDraw());
+		return new Response(200, GSON.toJson(body));
+	}
+
+	private Response doubleOpportunity(JsonObject envelope) {
+		var parsed = parseDecisionState(envelope, false);
+		Validations.requireNoDice(parsed.dfen());
+		requireNullOrAbsentLegalMoves(parsed.state());
+		var doubling = parseDoublingState(parsed.state());
+		var context = new DoubleOpportunityContext(
+				parsed.gameId(), parsed.seat(), parsed.version(), parsed.dfen(), parsed.clock(), doubling);
+
+		DoubleOfferAction action;
+		try {
+			action = strategy.onDoubleOpportunity(context);
+		} catch (RuntimeException _) {
+			return error(500, ERROR_STRATEGY_FAILED);
+		}
+		if (action == null) {
+			return error(500, ERROR_STRATEGY_NO_ACTION);
+		}
+
+		var body = new JsonObject();
+		body.addProperty("decisionId", context.decisionId());
+		body.addProperty("offerDouble", action.offerDouble());
+		return new Response(200, GSON.toJson(body));
+	}
+
+	private Response doubleDecision(JsonObject envelope) {
+		var parsed = parseDecisionState(envelope, false);
+		Validations.requireNoDice(parsed.dfen());
+		requireNullOrAbsentLegalMoves(parsed.state());
+		var doubling = parseDoublingState(parsed.state());
+		var context = new DoubleDecisionContext(
+				parsed.gameId(), parsed.seat(), parsed.version(), parsed.dfen(), parsed.clock(), doubling);
+
+		DoubleResponseAction action;
+		try {
+			action = strategy.onDoubleDecision(context);
+		} catch (RuntimeException _) {
+			return error(500, ERROR_STRATEGY_FAILED);
+		}
+		if (action == null) {
+			return error(500, ERROR_STRATEGY_NO_ACTION);
+		}
+
+		var body = new JsonObject();
+		body.addProperty("decisionId", context.decisionId());
+		body.addProperty("acceptDouble", action.acceptDouble());
 		return new Response(200, GSON.toJson(body));
 	}
 
@@ -416,6 +476,82 @@ public final class WebhookHandler {
 				&& element.isJsonPrimitive()
 				&& element.getAsJsonPrimitive().isBoolean()
 				&& element.getAsBoolean();
+	}
+
+	private static DoublingState parseDoublingState(JsonObject state) {
+		var doubling = requiredObject(state, "doubling");
+		var currency = requiredString(doubling, "currency");
+		if (!currency.equals(DoublingState.CURRENCY_PLAY_CREDIT)) {
+			throw new IllegalArgumentException("currency must be " + DoublingState.CURRENCY_PLAY_CREDIT);
+		}
+		var initialStake = requiredPositiveLong(doubling, "initialStake");
+		var currentStake = requiredPositiveLong(doubling, "currentStake");
+		var cubeValue = Math.toIntExact(requiredLong(doubling, "cubeValue"));
+		if (!DoublingState.VALID_CUBE_VALUES.contains(cubeValue)) {
+			throw new IllegalArgumentException("invalid cubeValue");
+		}
+		String cubeOwner;
+		if (cubeValue == 1) {
+			if (doubling.has(FIELD_CUBE_OWNER) && !doubling.get(FIELD_CUBE_OWNER).isJsonNull()) {
+				throw new IllegalArgumentException("centered cube (cubeValue == 1) must have null cubeOwner");
+			}
+			cubeOwner = null;
+		} else {
+			cubeOwner = requiredSeat(doubling, FIELD_CUBE_OWNER);
+		}
+		var maximumMultiplier = Math.toIntExact(requiredLong(doubling, "maximumMultiplier"));
+		if (!DoublingState.VALID_MULTIPLIERS.contains(maximumMultiplier)) {
+			throw new IllegalArgumentException("invalid maximumMultiplier");
+		}
+		var mayOfferDouble = requiredBoolean(doubling, "mayOfferDouble");
+		var turnSeat = requiredSeat(doubling, "turnSeat");
+		var decisionElement = doubling.get("decision");
+		if (decisionElement == null || decisionElement.isJsonNull() || !decisionElement.isJsonObject()) {
+			throw new IllegalArgumentException("decision must be an object");
+		}
+		var decision = parseDoublingDecision(decisionElement.getAsJsonObject(), currentStake);
+		return new DoublingState(
+				currency,
+				initialStake,
+				currentStake,
+				cubeValue,
+				cubeOwner,
+				maximumMultiplier,
+				mayOfferDouble,
+				turnSeat,
+				decision);
+	}
+
+	private static DoublingDecision parseDoublingDecision(JsonObject object, long currentStake) {
+		var id = requiredString(object, "id");
+		var kind = requiredString(object, "kind");
+		var seat = requiredSeat(object, "seat");
+		var proposedStake = requiredPositiveLong(object, "proposedStake");
+		if (proposedStake != currentStake * 2) {
+			throw new IllegalArgumentException("proposedStake must be currentStake * 2");
+		}
+		if (kind.equals(DoublingDecision.KIND_OFFER)) {
+			return new DoublingDecision.Offer(id, seat, proposedStake);
+		} else if (kind.equals(DoublingDecision.KIND_RESPONSE)) {
+			var offeredBy = requiredSeat(object, "offeredBy");
+			return new DoublingDecision.Response(id, seat, offeredBy, proposedStake);
+		} else {
+			throw new IllegalArgumentException("unrecognized decision kind: " + kind);
+		}
+	}
+
+	private static long requiredPositiveLong(JsonObject object, String field) {
+		var value = requiredLong(object, field);
+		if (value < 1) {
+			throw new IllegalArgumentException(field + " must be at least 1");
+		}
+		return value;
+	}
+
+	private static void requireNullOrAbsentLegalMoves(JsonObject state) {
+		if (state.has(FIELD_LEGAL_MOVES) && !state.get(FIELD_LEGAL_MOVES).isJsonNull()) {
+			throw new IllegalArgumentException(FIELD_LEGAL_MOVES + " must be null in pre-roll states");
+		}
 	}
 
 	private static String stripTrailingSlash(String url) {

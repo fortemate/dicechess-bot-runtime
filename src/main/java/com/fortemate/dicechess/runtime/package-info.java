@@ -50,6 +50,47 @@
  * };
  * }
  *
+ * <h2>Stake doubling</h2>
+ *
+ * <p>The exact lowercase {@code doubling} webhook capability opts an endpoint into pre-roll stake
+ * doubling decisions in staked games. Staked games use closed-loop {@code PLAY_CREDIT} units and
+ * follow the accepted {@code play-api} contract (ADR-0019). The platform resolves any pending draw
+ * first. If no draw is pending and the turn owner is eligible to offer, play-api delivers a dice-free
+ * {@code doubleOpportunity} before rolling. If an offer is made, the responder receives a dice-free
+ * {@code doubleDecision} before the roll point.
+ *
+ * <p>A bot author implements an intentional policy by overriding {@link
+ * com.fortemate.dicechess.runtime.BotStrategy#onDoubleOpportunity(DoubleOpportunityContext)} and/or
+ * {@link com.fortemate.dicechess.runtime.BotStrategy#onDoubleDecision(DoubleDecisionContext)}. Both
+ * methods have safe defaults:
+ * <ul>
+ *   <li>{@code onDoubleOpportunity} defaults to {@link com.fortemate.dicechess.runtime.DoubleOfferAction#roll()},
+ *       proceeding to roll without doubling;</li>
+ *   <li>{@code onDoubleDecision} defaults to {@link com.fortemate.dicechess.runtime.DoubleResponseAction#decline()},
+ *       declining an incoming offer.</li>
+ * </ul>
+ *
+ * {@snippet lang="java" :
+ * BotStrategy strategy = new BotStrategy() {
+ *     @Override
+ *     public TurnAction onTurn(TurnContext context) {
+ *         return new TurnAction(List.of("e2e4"));
+ *     }
+ *
+ *     @Override
+ *     public DoubleOfferAction onDoubleOpportunity(DoubleOpportunityContext context) {
+ *         // Evaluate engine policy using context.currentStake(), context.cubeValue(), context.dfen()
+ *         return DoubleOfferAction.roll();
+ *     }
+ *
+ *     @Override
+ *     public DoubleResponseAction onDoubleDecision(DoubleDecisionContext context) {
+ *         // Evaluate engine take/drop threshold using context.proposedStake(), context.offeredBy()
+ *         return DoubleResponseAction.decline();
+ *     }
+ * };
+ * }
+ *
  * <h2>Bots with no engine of their own</h2>
  *
  * <p>{@link com.fortemate.dicechess.runtime.TurnContext#legalMoves} carries every complete legal
