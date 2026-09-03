@@ -26,6 +26,16 @@ class CustomHandlerServerTest {
 			public DrawAction onDrawDecision(DrawDecisionContext context) {
 				return DrawAction.accept();
 			}
+
+			@Override
+			public DoubleOfferAction onDoubleOpportunity(DoubleOpportunityContext context) {
+				return DoubleOfferAction.offer();
+			}
+
+			@Override
+			public DoubleResponseAction onDoubleDecision(DoubleDecisionContext context) {
+				return DoubleResponseAction.accept();
+			}
 		};
 		var server = CustomHandlerServer.start(0, "/api/webhook", new WebhookHandler(SECRET, strategy));
 		try {
@@ -49,6 +59,18 @@ class CustomHandlerServerTest {
 			var draw = post(client, uri, drawBody, now);
 			assertThat(draw.statusCode()).isEqualTo(200);
 			assertThat(draw.body()).isEqualTo("{\"acceptDraw\":true}");
+
+			var oppBody =
+					"{\"type\":\"doubleOpportunity\",\"gameId\":\"g1\",\"seat\":\"White\",\"state\":{\"version\":6,\"dfen\":\"x\",\"activeSeat\":\"White\",\"dicePending\":false,\"doubling\":{\"currency\":\"PLAY_CREDIT\",\"initialStake\":10,\"currentStake\":10,\"cubeValue\":1,\"cubeOwner\":null,\"maximumMultiplier\":64,\"mayOfferDouble\":true,\"turnSeat\":\"White\",\"decision\":{\"id\":\"double_01K4F4Y7M8R2\",\"kind\":\"offer\",\"seat\":\"White\",\"proposedStake\":20}}}}";
+			var opp = post(client, uri, oppBody, now);
+			assertThat(opp.statusCode()).isEqualTo(200);
+			assertThat(opp.body()).isEqualTo("{\"decisionId\":\"double_01K4F4Y7M8R2\",\"offerDouble\":true}");
+
+			var decBody =
+					"{\"type\":\"doubleDecision\",\"gameId\":\"g1\",\"seat\":\"Black\",\"state\":{\"version\":7,\"dfen\":\"x\",\"activeSeat\":\"Black\",\"dicePending\":false,\"doubling\":{\"currency\":\"PLAY_CREDIT\",\"initialStake\":10,\"currentStake\":10,\"cubeValue\":1,\"cubeOwner\":null,\"maximumMultiplier\":64,\"mayOfferDouble\":false,\"turnSeat\":\"White\",\"decision\":{\"id\":\"double_01K4F4Y7M8R2\",\"kind\":\"response\",\"seat\":\"Black\",\"offeredBy\":\"White\",\"proposedStake\":20}}}}";
+			var dec = post(client, uri, decBody, now);
+			assertThat(dec.statusCode()).isEqualTo(200);
+			assertThat(dec.body()).isEqualTo("{\"decisionId\":\"double_01K4F4Y7M8R2\",\"acceptDouble\":true}");
 		} finally {
 			server.stop(0);
 		}

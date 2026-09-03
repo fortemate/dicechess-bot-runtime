@@ -26,6 +26,9 @@ server-provided legal turns, or the game clock.
 | `BotStrategy` | One required `onTurn` callback plus safe default methods for optional decisions. |
 | `TurnContext` / `TurnAction` | The signed turn input and the exact `moves` / `offerDraw` response. |
 | `DrawDecisionContext` / `DrawAction` | A dice-free draw decision and its exact `acceptDraw` response. |
+| `DoubleOpportunityContext` / `DoubleOfferAction` | A dice-free double opportunity and its exact `decisionId` / `offerDouble` response. |
+| `DoubleDecisionContext` / `DoubleResponseAction` | A dice-free double response decision and its exact `decisionId` / `acceptDouble` response. |
+| `DoublingState` / `DoublingDecision` | Public stake and cube state, multipliers, and typed doubling decision representation. |
 | `GameClock` | The mover's and opponent's remaining milliseconds, plus a nullable Fischer increment. |
 | `WebhookHandler` | Orchestrates ownership verification, signature checks, typed parsing, and strategy dispatch with bounded request errors. |
 | `CustomHandlerServer` | A JDK `HttpServer` wrapper reading `FUNCTIONS_CUSTOMHANDLER_PORT` — optional; bring your own HTTP layer if you'd rather. |
@@ -75,6 +78,48 @@ dice and sends the normal `yourTurn` delivery. With it, play-api first sends a d
 `drawDecision`. The default `onDrawDecision` returns `DrawAction.decline()`, so adopting v2 never
 silently opts a bot into accepting draws. Offering a draw is a turn action and defaults to false;
 check `TurnContext.mayOfferDraw()` before requesting one.
+
+### Stake doubling decisions
+
+The exact lowercase `doubling` webhook capability opts an endpoint into pre-roll stake doubling
+decisions in staked games. Staked games use closed-loop `PLAY_CREDIT` units and follow the accepted
+`play-api` contract (ADR-0019). The platform resolves any pending draw first. If no draw is pending
+and the turn owner is eligible to offer, play-api delivers a dice-free `doubleOpportunity` before
+rolling. If an offer is made, the responder receives a dice-free `doubleDecision` before the roll
+point.
+
+A bot author overrides `onDoubleOpportunity` and/or `onDoubleDecision` to integrate engine policy:
+
+```java
+import com.fortemate.dicechess.runtime.DoubleDecisionContext;
+import com.fortemate.dicechess.runtime.DoubleOfferAction;
+import com.fortemate.dicechess.runtime.DoubleOpportunityContext;
+import com.fortemate.dicechess.runtime.DoubleResponseAction;
+
+BotStrategy strategy = new BotStrategy() {
+    @Override
+    public TurnAction onTurn(TurnContext context) {
+        return new TurnAction(List.of("e2e4"));
+    }
+
+    @Override
+    public DoubleOfferAction onDoubleOpportunity(DoubleOpportunityContext context) {
+        // Evaluate engine offer threshold using context.currentStake(), context.cubeValue(), etc.
+        return DoubleOfferAction.roll(); // default safely rolls without offering
+    }
+
+    @Override
+    public DoubleResponseAction onDoubleDecision(DoubleDecisionContext context) {
+        // Evaluate engine take/drop threshold using context.proposedStake(), context.offeredBy(), etc.
+        return DoubleResponseAction.decline(); // default safely declines the offer
+    }
+};
+```
+
+The runtime defaults are intentionally safe: `onDoubleOpportunity` defaults to `DoubleOfferAction.roll()`,
+and `onDoubleDecision` defaults to `DoubleResponseAction.decline()`. Enabling the capability without an
+override never offers or accepts a double accidentally. Both contexts are structurally dice-free;
+`yourTurn` begins only after the authoritative roll.
 
 ### Turn context
 
