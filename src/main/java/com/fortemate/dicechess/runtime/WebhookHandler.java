@@ -42,6 +42,8 @@ public final class WebhookHandler {
 	private static final String FIELD_LEGAL_MOVES = "legalMoves";
 	private static final String FIELD_TIME_CONTROL = "timeControl";
 	private static final String FIELD_CUBE_OWNER = "cubeOwner";
+	private static final String FIELD_NONCE = "nonce";
+	private static final String FIELD_VERSION = "version";
 	private static final String ERROR_MALFORMED_ENVELOPE = "malformed envelope";
 	private static final String ERROR_STRATEGY_FAILED = "strategy failed";
 	private static final String ERROR_STRATEGY_NO_ACTION = "strategy returned no action";
@@ -218,10 +220,10 @@ public final class WebhookHandler {
 
 	private Response handleVerification(
 			Map<String, String> headers, String rawBody, JsonObject envelope, long now) {
-		if (!envelope.has("version") || envelope.get("version").isJsonNull()) {
+		if (!envelope.has(FIELD_VERSION) || envelope.get(FIELD_VERSION).isJsonNull()) {
 			return legacyHandshake(envelope);
 		}
-		var versionElement = envelope.get("version");
+		var versionElement = envelope.get(FIELD_VERSION);
 		if (!versionElement.isJsonPrimitive() || !versionElement.getAsJsonPrimitive().isNumber()) {
 			return error(400, "malformed version");
 		}
@@ -242,11 +244,11 @@ public final class WebhookHandler {
 	}
 
 	private static Response legacyHandshake(JsonObject envelope) {
-		var nonce = envelope.has("nonce") && !envelope.get("nonce").isJsonNull()
-				? envelope.get("nonce").getAsString()
+		var nonce = envelope.has(FIELD_NONCE) && !envelope.get(FIELD_NONCE).isJsonNull()
+				? envelope.get(FIELD_NONCE).getAsString()
 				: "";
 		var body = new JsonObject();
-		body.addProperty("nonce", nonce);
+		body.addProperty(FIELD_NONCE, nonce);
 		return new Response(200, GSON.toJson(body));
 	}
 
@@ -278,12 +280,12 @@ public final class WebhookHandler {
 		requiredString(bot, "name");
 		requiredString(envelope, "setupId");
 		requiredString(envelope, "revision");
-		var nonce = requiredString(envelope, "nonce");
+		var nonce = requiredString(envelope, FIELD_NONCE);
 		validateVerificationV2Nonce(nonce);
 
 		var proof = Signatures.activationProof(keys.pending(), rawBody);
 		var body = new JsonObject();
-		body.addProperty("nonce", nonce);
+		body.addProperty(FIELD_NONCE, nonce);
 		body.addProperty("proof", proof);
 		return new Response(200, GSON.toJson(body));
 	}
@@ -433,7 +435,7 @@ public final class WebhookHandler {
 		var gameId = requiredString(envelope, "gameId");
 		var seat = requiredSeat(envelope, "seat");
 		var state = requiredObject(envelope, "state");
-		var version = requiredLong(state, "version");
+		var version = requiredLong(state, FIELD_VERSION);
 		var dfen = requiredString(state, "dfen");
 		var activeSeat = requiredSeat(state, "activeSeat");
 		var dicePending = requiredBoolean(state, "dicePending");
@@ -485,7 +487,7 @@ public final class WebhookHandler {
 				return null;
 			}
 			var body = GSON.fromJson(response.body(), JsonObject.class);
-			if (requiredLong(body, "version") != expectedVersion
+			if (requiredLong(body, FIELD_VERSION) != expectedVersion
 					|| !requiredString(body, "dfen").equals(expectedDfen)
 					|| !requiredBoolean(body, "dicePending")) {
 				return null;

@@ -106,13 +106,15 @@ class WebhookKeysTest {
 
 	@Test
 	void fromEnvironmentFailsFastWhenNeitherIsConfiguredOrBothBlank() {
-		assertThatThrownBy(() -> WebhookKeys.fromEnvironment(Map.of()))
+		var emptyEnv = Map.<String, String>of();
+		assertThatThrownBy(() -> WebhookKeys.fromEnvironment(emptyEnv))
 				.isInstanceOf(IllegalArgumentException.class)
 				.hasMessage("neither DICECHESS_WEBHOOK_SECRET nor DICECHESS_WEBHOOK_NEXT_SECRET is configured");
 
-		assertThatThrownBy(() -> WebhookKeys.fromEnvironment(Map.of(
+		var blankEnv = Map.of(
 				WebhookKeys.ENV_ACTIVE_SECRET, "   ",
-				WebhookKeys.ENV_PENDING_SECRET, "")))
+				WebhookKeys.ENV_PENDING_SECRET, "");
+		assertThatThrownBy(() -> WebhookKeys.fromEnvironment(blankEnv))
 				.isInstanceOf(IllegalArgumentException.class)
 				.hasMessage("neither DICECHESS_WEBHOOK_SECRET nor DICECHESS_WEBHOOK_NEXT_SECRET is configured");
 	}
@@ -122,8 +124,9 @@ class WebhookKeysTest {
 		var keys = WebhookKeys.activeAndPending(ACTIVE, PENDING);
 		var string = keys.toString();
 
-		assertThat(string).isEqualTo("WebhookKeys[hasActive=true, hasPending=true]");
-		assertThat(string).doesNotContain(ACTIVE);
-		assertThat(string).doesNotContain(PENDING);
+		assertThat(string)
+				.isEqualTo("WebhookKeys[hasActive=true, hasPending=true]")
+				.doesNotContain(ACTIVE)
+				.doesNotContain(PENDING);
 	}
 }
