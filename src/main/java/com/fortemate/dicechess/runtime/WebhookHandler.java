@@ -258,7 +258,7 @@ public final class WebhookHandler {
 
 	private Response doubleOpportunity(JsonObject envelope) {
 		var parsed = parseDecisionState(envelope, false);
-		requireNoDice(parsed.dfen());
+		Validations.requireNoDice(parsed.dfen());
 		requireNullOrAbsentLegalMoves(parsed.state());
 		var doubling = parseDoublingState(parsed.state());
 		var context = new DoubleOpportunityContext(
@@ -282,7 +282,7 @@ public final class WebhookHandler {
 
 	private Response doubleDecision(JsonObject envelope) {
 		var parsed = parseDecisionState(envelope, false);
-		requireNoDice(parsed.dfen());
+		Validations.requireNoDice(parsed.dfen());
 		requireNullOrAbsentLegalMoves(parsed.state());
 		var doubling = parseDoublingState(parsed.state());
 		var context = new DoubleDecisionContext(
@@ -543,13 +543,6 @@ public final class WebhookHandler {
 			throw new IllegalArgumentException(field + " must be at least 1");
 		}
 		return value;
-	}
-
-	private static void requireNoDice(String dfen) {
-		var parts = dfen.trim().split("\\s+");
-		if (parts.length > 6) {
-			throw new IllegalArgumentException("dfen must not contain dice tokens before roll");
-		}
 	}
 
 	private static void requireNullOrAbsentLegalMoves(JsonObject state) {

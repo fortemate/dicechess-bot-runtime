@@ -1,6 +1,5 @@
 package com.fortemate.dicechess.runtime;
 
-import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -43,12 +42,12 @@ public record DoublingState(
 	 * Creates a validated doubling state.
 	 */
 	public DoublingState {
-		requireText(currency, "currency");
+		Validations.requireText(currency, "currency");
 		if (!currency.equals(CURRENCY_PLAY_CREDIT)) {
 			throw new IllegalArgumentException("currency must be " + CURRENCY_PLAY_CREDIT);
 		}
-		requirePositive(initialStake, "initialStake");
-		requirePositive(currentStake, "currentStake");
+		Validations.requirePositive(initialStake, "initialStake");
+		Validations.requirePositive(currentStake, "currentStake");
 		if (!VALID_CUBE_VALUES.contains(cubeValue)) {
 			throw new IllegalArgumentException("cubeValue must be one of " + VALID_CUBE_VALUES);
 		}
@@ -60,27 +59,8 @@ public record DoublingState(
 				throw new IllegalArgumentException("centered cube (cubeValue == 1) must have null cubeOwner");
 			}
 		} else {
-			requireSeat(cubeOwner, "cubeOwner");
+			Validations.requireSeat(cubeOwner, "cubeOwner");
 		}
-		requireSeat(turnSeat, "turnSeat");
-	}
-
-	private static void requireText(String value, String field) {
-		if (value == null || value.isBlank()) {
-			throw new IllegalArgumentException(field + " must not be blank");
-		}
-	}
-
-	private static void requireSeat(String seat, String field) {
-		Objects.requireNonNull(seat, field + " must not be null");
-		if (!seat.equals("White") && !seat.equals("Black")) {
-			throw new IllegalArgumentException(field + " must be White or Black");
-		}
-	}
-
-	private static void requirePositive(long value, String field) {
-		if (value < 1) {
-			throw new IllegalArgumentException(field + " must be at least 1");
-		}
+		Validations.requireSeat(turnSeat, "turnSeat");
 	}
 }

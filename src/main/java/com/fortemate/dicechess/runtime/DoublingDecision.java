@@ -1,6 +1,5 @@
 package com.fortemate.dicechess.runtime;
 
-import java.util.Objects;
 import java.util.regex.Pattern;
 
 /**
@@ -56,8 +55,8 @@ public sealed interface DoublingDecision permits DoublingDecision.Offer, Doublin
 		 */
 		public Offer {
 			requireDecisionId(id);
-			requireSeat(seat);
-			requirePositiveStake(proposedStake, "proposedStake");
+			Validations.requireSeat(seat);
+			Validations.requirePositive(proposedStake, "proposedStake");
 		}
 
 		@Override
@@ -84,9 +83,9 @@ public sealed interface DoublingDecision permits DoublingDecision.Offer, Doublin
 		 */
 		public Response {
 			requireDecisionId(id);
-			requireSeat(seat);
-			requireSeat(offeredBy);
-			requirePositiveStake(proposedStake, "proposedStake");
+			Validations.requireSeat(seat);
+			Validations.requireSeat(offeredBy, "offeredBy");
+			Validations.requirePositive(proposedStake, "proposedStake");
 			if (seat.equals(offeredBy)) {
 				throw new IllegalArgumentException("seat and offeredBy must be opposite seats");
 			}
@@ -101,19 +100,6 @@ public sealed interface DoublingDecision permits DoublingDecision.Offer, Doublin
 	private static void requireDecisionId(String id) {
 		if (id == null || !ID_PATTERN.matcher(id).matches()) {
 			throw new IllegalArgumentException("id must match pattern ^double_[A-Za-z0-9_-]+$");
-		}
-	}
-
-	private static void requireSeat(String seat) {
-		Objects.requireNonNull(seat, "seat must not be null");
-		if (!seat.equals("White") && !seat.equals("Black")) {
-			throw new IllegalArgumentException("seat must be White or Black");
-		}
-	}
-
-	private static void requirePositiveStake(long stake, String field) {
-		if (stake < 1) {
-			throw new IllegalArgumentException(field + " must be at least 1");
 		}
 	}
 }
