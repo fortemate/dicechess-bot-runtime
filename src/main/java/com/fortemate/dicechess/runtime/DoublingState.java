@@ -54,6 +54,9 @@ public record DoublingState(
 		if (!VALID_MULTIPLIERS.contains(maximumMultiplier)) {
 			throw new IllegalArgumentException("maximumMultiplier must be one of " + VALID_MULTIPLIERS);
 		}
+		if (cubeValue > maximumMultiplier) {
+			throw new IllegalArgumentException("cubeValue must not exceed maximumMultiplier");
+		}
 		if (cubeValue == 1) {
 			if (cubeOwner != null) {
 				throw new IllegalArgumentException("centered cube (cubeValue == 1) must have null cubeOwner");

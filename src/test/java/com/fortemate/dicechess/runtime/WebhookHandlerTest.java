@@ -695,7 +695,10 @@ class WebhookHandlerTest {
 				MINIMAL_OPPORTUNITY.replace("\"mayOfferDouble\":true", "\"mayOfferDouble\":false"),
 				MINIMAL_OPPORTUNITY.replace("\"id\":\"double_01K4F4Y7M8R2\"", "\"id\":\"invalid-id\""),
 				MINIMAL_OPPORTUNITY.replace(",\"doubling\":{", ",\"legalMoves\":{\"e2e4\":{}},\"doubling\":{"),
-				MINIMAL_OPPORTUNITY.replace("0 1", "0 1 NBK"));
+				MINIMAL_OPPORTUNITY.replace("0 1", "0 1 NBK"),
+				MINIMAL_OPPORTUNITY.replace("\"cubeValue\":1", "\"cubeValue\":4").replace("\"maximumMultiplier\":64", "\"maximumMultiplier\":2"),
+				MINIMAL_OPPORTUNITY.replace("\"cubeValue\":1", "\"cubeValue\":4294967298"),
+				MINIMAL_OPPORTUNITY.replace("\"maximumMultiplier\":64", "\"maximumMultiplier\":4294967298"));
 
 		for (var body : invalidOpportunityBodies) {
 			assertThat(handler.handle(signedHeaders(body, NOW), body, NOW).status()).as(body).isEqualTo(400);
@@ -713,13 +716,24 @@ class WebhookHandlerTest {
 				MINIMAL_DOUBLE_DECISION.replace("\"offeredBy\":\"White\"", "\"offeredBy\":\"Black\""),
 				MINIMAL_DOUBLE_DECISION.replace("\"id\":\"double_01K4F4Y7M8R2\"", "\"id\":\"\""),
 				MINIMAL_DOUBLE_DECISION.replace(",\"doubling\":{", ",\"legalMoves\":{\"e2e4\":{}},\"doubling\":{"),
-				MINIMAL_DOUBLE_DECISION.replace("0 1", "0 1 NBK"));
+				MINIMAL_DOUBLE_DECISION.replace("0 1", "0 1 NBK"),
+				MINIMAL_DOUBLE_DECISION.replace("\"cubeValue\":1", "\"cubeValue\":4").replace("\"cubeOwner\":null", "\"cubeOwner\":\"White\"").replace("\"maximumMultiplier\":64", "\"maximumMultiplier\":2"),
+				MINIMAL_DOUBLE_DECISION.replace("\"cubeValue\":1", "\"cubeValue\":4294967298"),
+				MINIMAL_DOUBLE_DECISION.replace("\"maximumMultiplier\":64", "\"maximumMultiplier\":4294967298"));
 
 		for (var body : invalidDecisionBodies) {
 			assertThat(handler.handle(signedHeaders(body, NOW), body, NOW).status()).as(body).isEqualTo(400);
 		}
 
 		assertThat(calls).hasValue(0);
+	}
+
+	@Test
+	void doublingStateRejectsCubeValueExceedingMaximumMultiplier() {
+		assertThatThrownBy(() -> new DoublingState(
+				"PLAY_CREDIT", 10L, 10L, 4, "White", 2, true, "White", null))
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessage("cubeValue must not exceed maximumMultiplier");
 	}
 
 	@Test

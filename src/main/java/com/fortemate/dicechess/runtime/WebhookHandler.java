@@ -486,7 +486,7 @@ public final class WebhookHandler {
 		}
 		var initialStake = requiredPositiveLong(doubling, "initialStake");
 		var currentStake = requiredPositiveLong(doubling, "currentStake");
-		var cubeValue = (int) requiredLong(doubling, "cubeValue");
+		var cubeValue = Math.toIntExact(requiredLong(doubling, "cubeValue"));
 		if (!DoublingState.VALID_CUBE_VALUES.contains(cubeValue)) {
 			throw new IllegalArgumentException("invalid cubeValue");
 		}
@@ -499,7 +499,7 @@ public final class WebhookHandler {
 		} else {
 			cubeOwner = requiredSeat(doubling, FIELD_CUBE_OWNER);
 		}
-		var maximumMultiplier = (int) requiredLong(doubling, "maximumMultiplier");
+		var maximumMultiplier = Math.toIntExact(requiredLong(doubling, "maximumMultiplier"));
 		if (!DoublingState.VALID_MULTIPLIERS.contains(maximumMultiplier)) {
 			throw new IllegalArgumentException("invalid maximumMultiplier");
 		}
