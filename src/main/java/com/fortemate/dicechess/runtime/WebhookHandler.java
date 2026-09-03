@@ -14,6 +14,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -23,8 +24,10 @@ import java.util.Objects;
 /**
  * Authenticates and dispatches DiceChess webhook deliveries to a {@link BotStrategy}.
  *
- * <p>The unsigned legacy ownership handshake is preserved. Game decisions are authenticated over
- * the exact raw body before any decision-specific state is read. A strategy runtime exception is
+ * <p>The unsigned legacy version-1 ownership handshake is preserved. Version-2 verification
+ * challenges are authenticated against the pending key and return a cryptographic activation
+ * response proof. Game decisions are authenticated over the exact raw body under active and/or
+ * pending keys before any decision-specific state is read. A strategy runtime exception is
  * converted to a bounded error response and its message is never returned to the caller.
  */
 public final class WebhookHandler {
@@ -39,6 +42,8 @@ public final class WebhookHandler {
 	private static final String FIELD_LEGAL_MOVES = "legalMoves";
 	private static final String FIELD_TIME_CONTROL = "timeControl";
 	private static final String FIELD_CUBE_OWNER = "cubeOwner";
+	private static final String FIELD_NONCE = "nonce";
+	private static final String FIELD_VERSION = "version";
 	private static final String ERROR_MALFORMED_ENVELOPE = "malformed envelope";
 	private static final String ERROR_STRATEGY_FAILED = "strategy failed";
 	private static final String ERROR_STRATEGY_NO_ACTION = "strategy returned no action";
@@ -50,12 +55,12 @@ public final class WebhookHandler {
 	private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
 	private static final Duration FALLBACK_TIMEOUT = Duration.ofSeconds(5);
 
-	private final String secret;
+	private final WebhookKeys keys;
 	private final String playApiBaseUrl;
 	private final BotStrategy strategy;
 
 	/**
-	 * Creates a handler without the {@code GET /games/{id}/moves} fallback.
+	 * Creates a handler with a single active secret and without the {@code GET /games/{id}/moves} fallback.
 	 *
 	 * @param secret the webhook secret issued by the platform
 	 * @param strategy the decision-oriented bot strategy
@@ -65,8 +70,8 @@ public final class WebhookHandler {
 	}
 
 	/**
-	 * Creates a handler that fetches {@code GET /games/{id}/moves} when a turn's inline move tree
-	 * is capped. The fallback endpoint is public and needs no additional credential.
+	 * Creates a handler with a single active secret that fetches {@code GET /games/{id}/moves} when a
+	 * turn's inline move tree is capped. The fallback endpoint is public and needs no additional credential.
 	 *
 	 * @param secret the webhook secret issued by the platform
 	 * @param playApiBaseUrl play-api's base URL; a trailing slash is tolerated
@@ -77,9 +82,44 @@ public final class WebhookHandler {
 		if (requiredSecret.isBlank()) {
 			throw new IllegalArgumentException("secret must not be blank");
 		}
-		this.secret = requiredSecret;
+		this.keys = WebhookKeys.activeOnly(requiredSecret);
 		this.playApiBaseUrl = playApiBaseUrl == null ? null : stripTrailingSlash(playApiBaseUrl);
 		this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
+	}
+
+	/**
+	 * Creates a handler with an immutable key configuration and without the
+	 * {@code GET /games/{id}/moves} fallback.
+	 *
+	 * @param keys the active and/or pending webhook keys
+	 * @param strategy the decision-oriented bot strategy
+	 */
+	public WebhookHandler(WebhookKeys keys, BotStrategy strategy) {
+		this(keys, null, strategy);
+	}
+
+	/**
+	 * Creates a handler with an immutable key configuration that fetches
+	 * {@code GET /games/{id}/moves} when a turn's inline move tree is capped. The fallback
+	 * endpoint is public and needs no additional credential.
+	 *
+	 * @param keys the active and/or pending webhook keys
+	 * @param playApiBaseUrl play-api's base URL; a trailing slash is tolerated
+	 * @param strategy the decision-oriented bot strategy
+	 */
+	public WebhookHandler(WebhookKeys keys, String playApiBaseUrl, BotStrategy strategy) {
+		this.keys = Objects.requireNonNull(keys, "keys must not be null");
+		this.playApiBaseUrl = playApiBaseUrl == null ? null : stripTrailingSlash(playApiBaseUrl);
+		this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
+	}
+
+	/**
+	 * Returns the immutable key configuration used by this handler.
+	 *
+	 * @return the webhook keys
+	 */
+	public WebhookKeys keys() {
+		return keys;
 	}
 
 	/**
@@ -105,7 +145,7 @@ public final class WebhookHandler {
 				if (!requiredString(envelope, "type").equals(type)) {
 					return error(400, ERROR_MALFORMED_ENVELOPE);
 				}
-				return handshake(envelope);
+				return handleVerification(headers, rawBody, envelope, nowEpochSeconds);
 			} catch (RuntimeException _) {
 				return error(400, ERROR_MALFORMED_ENVELOPE);
 			}
@@ -178,11 +218,95 @@ public final class WebhookHandler {
 		return envelope;
 	}
 
-	private Response handshake(JsonObject envelope) {
-		var nonce = envelope.has("nonce") ? envelope.get("nonce").getAsString() : "";
+	private Response handleVerification(
+			Map<String, String> headers, String rawBody, JsonObject envelope, long now) {
+		if (!envelope.has(FIELD_VERSION) || envelope.get(FIELD_VERSION).isJsonNull()) {
+			return legacyHandshake(envelope);
+		}
+		var versionElement = envelope.get(FIELD_VERSION);
+		if (!versionElement.isJsonPrimitive() || !versionElement.getAsJsonPrimitive().isNumber()) {
+			return error(400, "malformed version");
+		}
+		long version;
+		try {
+			version = exactLong(versionElement);
+		} catch (ArithmeticException | IllegalArgumentException _) {
+			return error(400, "malformed version");
+		}
+
+		if (version == 1) {
+			return legacyHandshake(envelope);
+		}
+		if (version == 2) {
+			return verificationV2(headers, rawBody, envelope, now);
+		}
+		return error(400, "unsupported version");
+	}
+
+	private static Response legacyHandshake(JsonObject envelope) {
+		var nonce = envelope.has(FIELD_NONCE) && !envelope.get(FIELD_NONCE).isJsonNull()
+				? envelope.get(FIELD_NONCE).getAsString()
+				: "";
 		var body = new JsonObject();
-		body.addProperty("nonce", nonce);
+		body.addProperty(FIELD_NONCE, nonce);
 		return new Response(200, GSON.toJson(body));
+	}
+
+	private Response verificationV2(
+			Map<String, String> headers, String rawBody, JsonObject envelope, long now) {
+		if (!keys.hasPending()) {
+			return error(401, "missing pending key");
+		}
+		var lowercased = lowercaseKeys(headers);
+		var timestampHeader = lowercased.get(TIMESTAMP_HEADER);
+		var signatureHeader = lowercased.get(SIGNATURE_HEADER);
+		if (timestampHeader == null || signatureHeader == null) {
+			return error(401, "missing signature headers");
+		}
+
+		long timestamp;
+		try {
+			timestamp = Long.parseLong(timestampHeader);
+		} catch (NumberFormatException _) {
+			return error(401, "malformed timestamp header");
+		}
+
+		if (!Signatures.verify(keys.pending(), timestamp, rawBody, signatureHeader, now)) {
+			return error(401, "invalid or expired signature");
+		}
+
+		var bot = requiredObject(envelope, "bot");
+		requiredString(bot, "team");
+		requiredString(bot, "name");
+		requiredString(envelope, "setupId");
+		requiredString(envelope, "revision");
+		var nonce = requiredString(envelope, FIELD_NONCE);
+		validateVerificationV2Nonce(nonce);
+
+		var proof = Signatures.activationProof(keys.pending(), rawBody);
+		var body = new JsonObject();
+		body.addProperty(FIELD_NONCE, nonce);
+		body.addProperty("proof", proof);
+		return new Response(200, GSON.toJson(body));
+	}
+
+	private static void validateVerificationV2Nonce(String nonce) {
+		if (nonce.contains("=")) {
+			throw new IllegalArgumentException("nonce must not contain padding");
+		}
+		byte[] decoded;
+		try {
+			decoded = Base64.getUrlDecoder().decode(nonce);
+		} catch (IllegalArgumentException e) {
+			throw new IllegalArgumentException("nonce must be valid unpadded base64url", e);
+		}
+		if (decoded.length < 16) {
+			throw new IllegalArgumentException("nonce must carry at least 128 bits (16 bytes)");
+		}
+		var reencoded = Base64.getUrlEncoder().withoutPadding().encodeToString(decoded);
+		if (!reencoded.equals(nonce)) {
+			throw new IllegalArgumentException("nonce is not canonically encoded unpadded base64url");
+		}
 	}
 
 	private Response authenticate(Map<String, String> headers, String rawBody, long now) {
@@ -200,7 +324,7 @@ public final class WebhookHandler {
 			return error(401, "malformed timestamp header");
 		}
 
-		if (!Signatures.verify(secret, timestamp, rawBody, signatureHeader, now)) {
+		if (!Signatures.verify(keys, timestamp, rawBody, signatureHeader, now)) {
 			return error(401, "invalid or expired signature");
 		}
 		return null;
@@ -311,7 +435,7 @@ public final class WebhookHandler {
 		var gameId = requiredString(envelope, "gameId");
 		var seat = requiredSeat(envelope, "seat");
 		var state = requiredObject(envelope, "state");
-		var version = requiredLong(state, "version");
+		var version = requiredLong(state, FIELD_VERSION);
 		var dfen = requiredString(state, "dfen");
 		var activeSeat = requiredSeat(state, "activeSeat");
 		var dicePending = requiredBoolean(state, "dicePending");
@@ -363,7 +487,7 @@ public final class WebhookHandler {
 				return null;
 			}
 			var body = GSON.fromJson(response.body(), JsonObject.class);
-			if (requiredLong(body, "version") != expectedVersion
+			if (requiredLong(body, FIELD_VERSION) != expectedVersion
 					|| !requiredString(body, "dfen").equals(expectedDfen)
 					|| !requiredBoolean(body, "dicePending")) {
 				return null;
@@ -560,7 +684,9 @@ public final class WebhookHandler {
 
 	private static Map<String, String> lowercaseKeys(Map<String, String> headers) {
 		var result = new HashMap<String, String>();
-		headers.forEach((key, value) -> result.put(key.toLowerCase(Locale.ROOT), value));
+		if (headers != null) {
+			headers.forEach((key, value) -> result.put(key.toLowerCase(Locale.ROOT), value));
+		}
 		return result;
 	}
 

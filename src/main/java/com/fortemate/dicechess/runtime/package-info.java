@@ -109,6 +109,25 @@
  * com.fortemate.dicechess.runtime.TurnContext#mayOfferDraw} fails closed to {@code false} when the
  * optional wire field is absent, null, or malformed.
  *
+ * <h2>Key rotation and verification v2 (ADR 004)</h2>
+ *
+ * <p>To support staged secret management, URL replacement, and zero-downtime same-URL secret rotation,
+ * {@link com.fortemate.dicechess.runtime.WebhookKeys} provides an immutable key-set configuration:
+ * <ul>
+ *   <li><b>Active only:</b> steady-state delivery verification;</li>
+ *   <li><b>Pending only:</b> initial registration of an unverified endpoint before activation;</li>
+ *   <li><b>Active and pending:</b> staged rotation during which activation challenges are verified
+ *       using the pending key only, while ongoing gameplay deliveries are accepted under either key.</li>
+ * </ul>
+ *
+ * <p>When both keys are configured, delivery signature verification evaluates both keys using constant-time
+ * comparisons without early return to eliminate timing oracles, and never exposes which key matched.
+ *
+ * <p>Legacy version-1 and version-absent {@code verification} challenges continue to echo the nonce
+ * without signature validation. Challenges declaring {@code "version": 2} require signed headers over the exact
+ * raw request body with the pending key, and return an independent cryptographic HMAC response proof.
+ * Single-key endpoints cannot perform safe same-URL session rotation without downtime.
+ *
  * <h2>Concurrency</h2>
  *
  * <p>One strategy instance is shared by its handler. {@link

@@ -835,6 +835,383 @@ class WebhookHandlerTest {
 				.containsExactly("gameId", "seat", "version", "dfen", "clock", "doubling");
 	}
 
+	@Test
+	void legacyHandshakeAcceptsVersionAbsentAndVersion1() {
+		var handler = passiveHandler();
+
+		var versionAbsent = handler.handle(Map.of(), "{\"type\":\"verification\",\"nonce\":\"xyz\"}", NOW);
+		assertThat(versionAbsent.status()).isEqualTo(200);
+		assertThat(versionAbsent.jsonBody()).isEqualTo("{\"nonce\":\"xyz\"}");
+
+		var version1 = handler.handle(Map.of(), "{\"type\":\"verification\",\"version\":1,\"nonce\":\"xyz\"}", NOW);
+		assertThat(version1.status()).isEqualTo(200);
+		assertThat(version1.jsonBody()).isEqualTo("{\"nonce\":\"xyz\"}");
+	}
+
+	@Test
+	void verificationV2SucceedsWithCanonicalVectorUnderPendingOnlyAndDualKey() {
+		var pendingOnlyHandler = new WebhookHandler(
+				WebhookKeys.pendingOnly(VerificationV2Vectors.CANONICAL_SECRET),
+				context -> new TurnAction(List.of()));
+
+		var headers = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(VerificationV2Vectors.CANONICAL_TIMESTAMP),
+				WebhookHandler.SIGNATURE_HEADER, VerificationV2Vectors.CANONICAL_REQUEST_SIGNATURE);
+
+		var response = pendingOnlyHandler.handle(
+				headers,
+				VerificationV2Vectors.CANONICAL_RAW_BODY,
+				VerificationV2Vectors.CANONICAL_TIMESTAMP);
+
+		assertThat(response.status()).isEqualTo(200);
+		assertThat(response.jsonBody()).isEqualTo(VerificationV2Vectors.CANONICAL_SUCCESS_RESPONSE_BODY);
+
+		// Dual-key configuration (active + pending) also accepts verification v2 with pending key
+		var dualKeyHandler = new WebhookHandler(
+				WebhookKeys.activeAndPending("active-steady-state-secret", VerificationV2Vectors.CANONICAL_SECRET),
+				context -> new TurnAction(List.of()));
+
+		var dualResponse = dualKeyHandler.handle(
+				headers,
+				VerificationV2Vectors.CANONICAL_RAW_BODY,
+				VerificationV2Vectors.CANONICAL_TIMESTAMP);
+
+		assertThat(dualResponse.status()).isEqualTo(200);
+		assertThat(dualResponse.jsonBody()).isEqualTo(VerificationV2Vectors.CANONICAL_SUCCESS_RESPONSE_BODY);
+	}
+
+	@Test
+	void verificationV2NeverPromotesOrMutatesKeysAutomatically() {
+		var initialKeys = WebhookKeys.activeAndPending("active-key", VerificationV2Vectors.CANONICAL_SECRET);
+		var handler = new WebhookHandler(initialKeys, context -> new TurnAction(List.of()));
+
+		var headers = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(VerificationV2Vectors.CANONICAL_TIMESTAMP),
+				WebhookHandler.SIGNATURE_HEADER, VerificationV2Vectors.CANONICAL_REQUEST_SIGNATURE);
+
+		var response = handler.handle(
+				headers,
+				VerificationV2Vectors.CANONICAL_RAW_BODY,
+				VerificationV2Vectors.CANONICAL_TIMESTAMP);
+
+		assertThat(response.status()).isEqualTo(200);
+		assertThat(handler.keys()).isEqualTo(initialKeys);
+		assertThat(handler.keys().active()).isEqualTo("active-key");
+		assertThat(handler.keys().pending()).isEqualTo(VerificationV2Vectors.CANONICAL_SECRET);
+	}
+
+	@Test
+	void verificationV2FailsWhenPendingKeyIsNotConfigured() {
+		var activeOnlyHandler = new WebhookHandler(
+				WebhookKeys.activeOnly(VerificationV2Vectors.CANONICAL_SECRET),
+				context -> new TurnAction(List.of()));
+
+		var headers = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(VerificationV2Vectors.CANONICAL_TIMESTAMP),
+				WebhookHandler.SIGNATURE_HEADER, VerificationV2Vectors.CANONICAL_REQUEST_SIGNATURE);
+
+		var response = activeOnlyHandler.handle(
+				headers,
+				VerificationV2Vectors.CANONICAL_RAW_BODY,
+				VerificationV2Vectors.CANONICAL_TIMESTAMP);
+
+		assertThat(response.status()).isEqualTo(401);
+		assertThat(response.jsonBody()).contains("missing pending key");
+	}
+
+	@Test
+	void verificationV2FailsWhenSignedWithActiveKeyInsteadOfPendingKey() {
+		var activeSecret = "active-key-secret-1234567890abcdef1234567890abcdef1234567890abcdef12";
+		var dualHandler = new WebhookHandler(
+				WebhookKeys.activeAndPending(activeSecret, VerificationV2Vectors.CANONICAL_SECRET),
+				context -> new TurnAction(List.of()));
+
+		// Sign with active secret instead of pending secret
+		var activeSignature = Signatures.sign(
+				activeSecret,
+				VerificationV2Vectors.CANONICAL_TIMESTAMP,
+				VerificationV2Vectors.CANONICAL_RAW_BODY);
+
+		var headers = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(VerificationV2Vectors.CANONICAL_TIMESTAMP),
+				WebhookHandler.SIGNATURE_HEADER, activeSignature);
+
+		var response = dualHandler.handle(
+				headers,
+				VerificationV2Vectors.CANONICAL_RAW_BODY,
+				VerificationV2Vectors.CANONICAL_TIMESTAMP);
+
+		assertThat(response.status()).isEqualTo(401);
+		assertThat(response.jsonBody()).contains("invalid or expired signature");
+	}
+
+	@Test
+	void verificationV2FailsOnStaleOrFutureTimestamp() {
+		var handler = new WebhookHandler(
+				WebhookKeys.pendingOnly(VerificationV2Vectors.CANONICAL_SECRET),
+				context -> new TurnAction(List.of()));
+
+		var baseTime = VerificationV2Vectors.CANONICAL_TIMESTAMP;
+		var staleTime = baseTime - Signatures.REPLAY_WINDOW_SECONDS - 1;
+		var staleSig = Signatures.sign(VerificationV2Vectors.CANONICAL_SECRET, staleTime, VerificationV2Vectors.CANONICAL_RAW_BODY);
+
+		var staleResponse = handler.handle(
+				Map.of(WebhookHandler.TIMESTAMP_HEADER, String.valueOf(staleTime), WebhookHandler.SIGNATURE_HEADER, staleSig),
+				VerificationV2Vectors.CANONICAL_RAW_BODY,
+				baseTime);
+		assertThat(staleResponse.status()).isEqualTo(401);
+
+		var futureTime = baseTime + Signatures.REPLAY_WINDOW_SECONDS + 1;
+		var futureSig = Signatures.sign(VerificationV2Vectors.CANONICAL_SECRET, futureTime, VerificationV2Vectors.CANONICAL_RAW_BODY);
+
+		var futureResponse = handler.handle(
+				Map.of(WebhookHandler.TIMESTAMP_HEADER, String.valueOf(futureTime), WebhookHandler.SIGNATURE_HEADER, futureSig),
+				VerificationV2Vectors.CANONICAL_RAW_BODY,
+				baseTime);
+		assertThat(futureResponse.status()).isEqualTo(401);
+	}
+
+	@Test
+	void verificationV2FailsOnTamperedRawBytes() {
+		var handler = new WebhookHandler(
+				WebhookKeys.pendingOnly(VerificationV2Vectors.CANONICAL_SECRET),
+				context -> new TurnAction(List.of()));
+
+		var tamperedBody = VerificationV2Vectors.CANONICAL_RAW_BODY + " ";
+		var headers = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(VerificationV2Vectors.CANONICAL_TIMESTAMP),
+				WebhookHandler.SIGNATURE_HEADER, VerificationV2Vectors.CANONICAL_REQUEST_SIGNATURE);
+
+		var response = handler.handle(headers, tamperedBody, VerificationV2Vectors.CANONICAL_TIMESTAMP);
+		assertThat(response.status()).isEqualTo(401);
+	}
+
+	@Test
+	void verificationV2FailsOnMissingOrMalformedHeaders() {
+		var handler = new WebhookHandler(
+				WebhookKeys.pendingOnly(VerificationV2Vectors.CANONICAL_SECRET),
+				context -> new TurnAction(List.of()));
+
+		var noHeaders = handler.handle(Map.of(), VerificationV2Vectors.CANONICAL_RAW_BODY, VerificationV2Vectors.CANONICAL_TIMESTAMP);
+		assertThat(noHeaders.status()).isEqualTo(401);
+
+		var badTimestamp = handler.handle(
+				Map.of(WebhookHandler.TIMESTAMP_HEADER, "not-a-number", WebhookHandler.SIGNATURE_HEADER, "sig"),
+				VerificationV2Vectors.CANONICAL_RAW_BODY,
+				VerificationV2Vectors.CANONICAL_TIMESTAMP);
+		assertThat(badTimestamp.status()).isEqualTo(401);
+	}
+
+	@Test
+	void verificationV2RejectsSignatureReflectionAndUnrelatedProofs() {
+		var sig = VerificationV2Vectors.CANONICAL_REQUEST_SIGNATURE;
+		var proof = VerificationV2Vectors.CANONICAL_RESPONSE_PROOF;
+
+		// Proof must not reflect the signature
+		assertThat(proof).isNotEqualTo(sig);
+
+		// Changing bot, setupId, revision, or nonce changes proof
+		var otherBody = VerificationV2Vectors.CANONICAL_RAW_BODY.replace("\"greedy\"", "\"tactical\"");
+		var otherProof = Signatures.activationProof(VerificationV2Vectors.CANONICAL_SECRET, otherBody);
+		assertThat(otherProof).isNotEqualTo(proof);
+
+		var otherSetupBody = VerificationV2Vectors.CANONICAL_RAW_BODY.replace("\"whs_test\"", "\"whs_other\"");
+		var otherSetupProof = Signatures.activationProof(VerificationV2Vectors.CANONICAL_SECRET, otherSetupBody);
+		assertThat(otherSetupProof).isNotEqualTo(proof);
+	}
+
+	@Test
+	void verificationV2RejectsMalformedNonces() {
+		var handler = new WebhookHandler(
+				WebhookKeys.pendingOnly(VerificationV2Vectors.CANONICAL_SECRET),
+				context -> new TurnAction(List.of()));
+
+		// Nonce with padding '='
+		var paddedBody = VerificationV2Vectors.CANONICAL_RAW_BODY.replace("AQIDBAUGBwgJCgsMDQ4PEA", "AQIDBAUGBwgJCgsMDQ4PEA==");
+		var paddedSig = Signatures.sign(VerificationV2Vectors.CANONICAL_SECRET, VerificationV2Vectors.CANONICAL_TIMESTAMP, paddedBody);
+		var paddedResp = handler.handle(
+				Map.of(WebhookHandler.TIMESTAMP_HEADER, String.valueOf(VerificationV2Vectors.CANONICAL_TIMESTAMP),
+						WebhookHandler.SIGNATURE_HEADER, paddedSig),
+				paddedBody,
+				VerificationV2Vectors.CANONICAL_TIMESTAMP);
+		assertThat(paddedResp.status()).isEqualTo(400);
+
+		// Nonce with fewer than 16 bytes (128 bits)
+		var shortNonce = "AQIDBAUGBwgJCgsMDQ"; // 14 bytes
+		var shortBody = VerificationV2Vectors.CANONICAL_RAW_BODY.replace("AQIDBAUGBwgJCgsMDQ4PEA", shortNonce);
+		var shortSig = Signatures.sign(VerificationV2Vectors.CANONICAL_SECRET, VerificationV2Vectors.CANONICAL_TIMESTAMP, shortBody);
+		var shortResp = handler.handle(
+				Map.of(WebhookHandler.TIMESTAMP_HEADER, String.valueOf(VerificationV2Vectors.CANONICAL_TIMESTAMP),
+						WebhookHandler.SIGNATURE_HEADER, shortSig),
+				shortBody,
+				VerificationV2Vectors.CANONICAL_TIMESTAMP);
+		assertThat(shortResp.status()).isEqualTo(400);
+
+		// Nonce with non-base64url characters (e.g. + or /)
+		var invalidCharNonce = "AQIDBAUGBwgJCgsMDQ4P+A";
+		var invalidCharBody = VerificationV2Vectors.CANONICAL_RAW_BODY.replace("AQIDBAUGBwgJCgsMDQ4PEA", invalidCharNonce);
+		var invalidCharSig = Signatures.sign(VerificationV2Vectors.CANONICAL_SECRET, VerificationV2Vectors.CANONICAL_TIMESTAMP, invalidCharBody);
+		var invalidCharResp = handler.handle(
+				Map.of(WebhookHandler.TIMESTAMP_HEADER, String.valueOf(VerificationV2Vectors.CANONICAL_TIMESTAMP),
+						WebhookHandler.SIGNATURE_HEADER, invalidCharSig),
+				invalidCharBody,
+				VerificationV2Vectors.CANONICAL_TIMESTAMP);
+		assertThat(invalidCharResp.status()).isEqualTo(400);
+	}
+
+	@Test
+	void verificationV2RejectsMissingTypedEnvelopeFields() {
+		var handler = new WebhookHandler(
+				WebhookKeys.pendingOnly(VerificationV2Vectors.CANONICAL_SECRET),
+				context -> new TurnAction(List.of()));
+
+		// Missing bot field
+		var missingBotBody = "{\"type\":\"verification\",\"version\":2,\"setupId\":\"whs_test\",\"revision\":\"whrev_test\",\"nonce\":\"AQIDBAUGBwgJCgsMDQ4PEA\"}";
+		var missingBotSig = Signatures.sign(VerificationV2Vectors.CANONICAL_SECRET, VerificationV2Vectors.CANONICAL_TIMESTAMP, missingBotBody);
+		var missingBotResp = handler.handle(
+				Map.of(WebhookHandler.TIMESTAMP_HEADER, String.valueOf(VerificationV2Vectors.CANONICAL_TIMESTAMP),
+						WebhookHandler.SIGNATURE_HEADER, missingBotSig),
+				missingBotBody,
+				VerificationV2Vectors.CANONICAL_TIMESTAMP);
+		assertThat(missingBotResp.status()).isEqualTo(400);
+
+		// Missing setupId
+		var missingSetupBody = "{\"type\":\"verification\",\"version\":2,\"bot\":{\"team\":\"acme\",\"name\":\"greedy\"},\"revision\":\"whrev_test\",\"nonce\":\"AQIDBAUGBwgJCgsMDQ4PEA\"}";
+		var missingSetupSig = Signatures.sign(VerificationV2Vectors.CANONICAL_SECRET, VerificationV2Vectors.CANONICAL_TIMESTAMP, missingSetupBody);
+		var missingSetupResp = handler.handle(
+				Map.of(WebhookHandler.TIMESTAMP_HEADER, String.valueOf(VerificationV2Vectors.CANONICAL_TIMESTAMP),
+						WebhookHandler.SIGNATURE_HEADER, missingSetupSig),
+				missingSetupBody,
+				VerificationV2Vectors.CANONICAL_TIMESTAMP);
+		assertThat(missingSetupResp.status()).isEqualTo(400);
+	}
+
+	@Test
+	void verificationRejectsUnknownVersionsDeterministically() {
+		var handler = new WebhookHandler(
+				WebhookKeys.pendingOnly(VerificationV2Vectors.CANONICAL_SECRET),
+				context -> new TurnAction(List.of()));
+
+		var version3Body = VerificationV2Vectors.CANONICAL_RAW_BODY.replace("\"version\":2", "\"version\":3");
+		var version3Sig = Signatures.sign(VerificationV2Vectors.CANONICAL_SECRET, VerificationV2Vectors.CANONICAL_TIMESTAMP, version3Body);
+		var version3Resp = handler.handle(
+				Map.of(WebhookHandler.TIMESTAMP_HEADER, String.valueOf(VerificationV2Vectors.CANONICAL_TIMESTAMP),
+						WebhookHandler.SIGNATURE_HEADER, version3Sig),
+				version3Body,
+				VerificationV2Vectors.CANONICAL_TIMESTAMP);
+		assertThat(version3Resp.status()).isEqualTo(400);
+
+		var stringVersionBody = VerificationV2Vectors.CANONICAL_RAW_BODY.replace("\"version\":2", "\"version\":\"2\"");
+		var stringVersionResp = handler.handle(
+				Map.of(WebhookHandler.TIMESTAMP_HEADER, String.valueOf(VerificationV2Vectors.CANONICAL_TIMESTAMP),
+						WebhookHandler.SIGNATURE_HEADER, "dummy"),
+				stringVersionBody,
+				VerificationV2Vectors.CANONICAL_TIMESTAMP);
+		assertThat(stringVersionResp.status()).isEqualTo(400);
+	}
+
+	@Test
+	void dualKeyConfigurationAcceptsDeliveriesSignedWithEitherKey() {
+		var activeSecret = "active-key-secret-1234567890abcdef1234567890abcdef1234567890abcdef12";
+		var pendingSecret = "pending-key-secret-abcdef1234567890abcdef1234567890abcdef1234567890";
+		var dualKeys = WebhookKeys.activeAndPending(activeSecret, pendingSecret);
+
+		BotStrategy strategy = new BotStrategy() {
+			@Override
+			public TurnAction onTurn(TurnContext context) {
+				return new TurnAction(List.of("e2e4"));
+			}
+
+			@Override
+			public DrawAction onDrawDecision(DrawDecisionContext context) {
+				return DrawAction.accept();
+			}
+
+			@Override
+			public DoubleOfferAction onDoubleOpportunity(DoubleOpportunityContext context) {
+				return DoubleOfferAction.offer();
+			}
+
+			@Override
+			public DoubleResponseAction onDoubleDecision(DoubleDecisionContext context) {
+				return DoubleResponseAction.accept();
+			}
+		};
+
+		var handler = new WebhookHandler(dualKeys, strategy);
+
+		// yourTurn with active key
+		var turnActiveHeaders = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(NOW),
+				WebhookHandler.SIGNATURE_HEADER, Signatures.sign(activeSecret, NOW, MINIMAL_TURN));
+		assertThat(handler.handle(turnActiveHeaders, MINIMAL_TURN, NOW).status()).isEqualTo(200);
+
+		// yourTurn with pending key
+		var turnPendingHeaders = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(NOW),
+				WebhookHandler.SIGNATURE_HEADER, Signatures.sign(pendingSecret, NOW, MINIMAL_TURN));
+		assertThat(handler.handle(turnPendingHeaders, MINIMAL_TURN, NOW).status()).isEqualTo(200);
+
+		// drawDecision with active key
+		var drawActiveHeaders = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(NOW),
+				WebhookHandler.SIGNATURE_HEADER, Signatures.sign(activeSecret, NOW, MINIMAL_DRAW));
+		assertThat(handler.handle(drawActiveHeaders, MINIMAL_DRAW, NOW).status()).isEqualTo(200);
+
+		// drawDecision with pending key
+		var drawPendingHeaders = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(NOW),
+				WebhookHandler.SIGNATURE_HEADER, Signatures.sign(pendingSecret, NOW, MINIMAL_DRAW));
+		assertThat(handler.handle(drawPendingHeaders, MINIMAL_DRAW, NOW).status()).isEqualTo(200);
+
+		// doubleOpportunity with active key
+		var dOppActiveHeaders = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(NOW),
+				WebhookHandler.SIGNATURE_HEADER, Signatures.sign(activeSecret, NOW, MINIMAL_OPPORTUNITY));
+		assertThat(handler.handle(dOppActiveHeaders, MINIMAL_OPPORTUNITY, NOW).status()).isEqualTo(200);
+
+		// doubleOpportunity with pending key
+		var dOppPendingHeaders = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(NOW),
+				WebhookHandler.SIGNATURE_HEADER, Signatures.sign(pendingSecret, NOW, MINIMAL_OPPORTUNITY));
+		assertThat(handler.handle(dOppPendingHeaders, MINIMAL_OPPORTUNITY, NOW).status()).isEqualTo(200);
+
+		// doubleDecision with active key
+		var dDecActiveHeaders = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(NOW),
+				WebhookHandler.SIGNATURE_HEADER, Signatures.sign(activeSecret, NOW, MINIMAL_DOUBLE_DECISION));
+		assertThat(handler.handle(dDecActiveHeaders, MINIMAL_DOUBLE_DECISION, NOW).status()).isEqualTo(200);
+
+		// doubleDecision with pending key
+		var dDecPendingHeaders = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(NOW),
+				WebhookHandler.SIGNATURE_HEADER, Signatures.sign(pendingSecret, NOW, MINIMAL_DOUBLE_DECISION));
+		assertThat(handler.handle(dDecPendingHeaders, MINIMAL_DOUBLE_DECISION, NOW).status()).isEqualTo(200);
+
+		// Delivery signed with wrong key is rejected
+		var wrongHeaders = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(NOW),
+				WebhookHandler.SIGNATURE_HEADER, Signatures.sign("wrong-key", NOW, MINIMAL_TURN));
+		assertThat(handler.handle(wrongHeaders, MINIMAL_TURN, NOW).status()).isEqualTo(401);
+
+		// Handler key state is not mutated
+		assertThat(handler.keys()).isEqualTo(dualKeys);
+	}
+
+	@Test
+	void postReadbackPromotedConfigurationAcceptsDeliveriesWithNewActiveKey() {
+		// After operator reads back authoritative state and promotes pending key to active:
+		var promotedKeys = WebhookKeys.activeOnly(VerificationV2Vectors.CANONICAL_SECRET);
+		var handler = new WebhookHandler(promotedKeys, context -> new TurnAction(List.of()));
+
+		var headers = Map.of(
+				WebhookHandler.TIMESTAMP_HEADER, String.valueOf(NOW),
+				WebhookHandler.SIGNATURE_HEADER, Signatures.sign(VerificationV2Vectors.CANONICAL_SECRET, NOW, MINIMAL_TURN));
+
+		var response = handler.handle(headers, MINIMAL_TURN, NOW);
+		assertThat(response.status()).isEqualTo(200);
+	}
+
 	private static HttpServer stubMovesEndpoint(String gameId, String responseBody, AtomicInteger calls)
 			throws IOException {
 		var server = HttpServer.create(new InetSocketAddress(0), 0);
