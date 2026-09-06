@@ -9,6 +9,10 @@ import java.util.Objects;
  * revealing the roll. Note that {@link #turnSeat()} identifies the opponent whose turn will resume
  * after an acceptance, whereas {@link #seat()} identifies the responder currently deciding.
  *
+ * <p><b>Warning:</b> The DFEN active colour (turn indicator) in this context reflects the offerer
+ * (whose turn was paused to deliver the offer), not the responder. Strategies evaluating position
+ * or material must evaluate relative to {@link #seat()}, not the DFEN active colour.
+ *
  * @param gameId the game's id
  * @param seat the responder's seat, exactly {@code White} or {@code Black}
  * @param version the authoritative game-state version carried by the delivery
