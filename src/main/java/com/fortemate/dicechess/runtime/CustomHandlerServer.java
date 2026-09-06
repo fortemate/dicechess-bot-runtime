@@ -51,6 +51,12 @@ public final class CustomHandlerServer {
 
 	private static final Duration RESIGN_ALL_TIMEOUT = Duration.ofSeconds(5);
 
+	/**
+	 * The JDK platform logger, so a shutdown diagnostic reaches whatever logging the application configured instead of
+	 * being written straight to its standard error. No logging dependency is added to consumers by choosing it.
+	 */
+	private static final System.Logger LOG = System.getLogger(CustomHandlerServer.class.getName());
+
 	private CustomHandlerServer() {}
 
 	/**
@@ -193,8 +199,8 @@ public final class CustomHandlerServer {
 
 	/**
 	 * Concedes every game through play-api. Returns whether the server actually accepted the request; anything else,
-	 * including a transport failure, is reported on {@code System.err} so an operator can tell a conceded shutdown
-	 * from one that only looked like it.
+	 * including a transport failure, is logged so an operator can tell a conceded shutdown from one that only looked
+	 * like it.
 	 */
 	private static boolean resignAll(String token, String baseUrl) {
 		var uri = URI.create(stripTrailingSlash(baseUrl) + "/bot/games/resign-all");
@@ -209,12 +215,12 @@ public final class CustomHandlerServer {
 			if (status >= 200 && status < 300) {
 				return true;
 			}
-			System.err.printf("[dicechess] resign-all answered HTTP %d; draining instead%n", status);
+			LOG.log(System.Logger.Level.WARNING, "resign-all answered HTTP {0}; draining instead", status);
 		} catch (InterruptedException _) {
 			Thread.currentThread().interrupt();
-			System.err.println("[dicechess] resign-all was interrupted; draining instead");
+			LOG.log(System.Logger.Level.WARNING, "resign-all was interrupted; draining instead");
 		} catch (IOException | RuntimeException e) {
-			System.err.printf("[dicechess] resign-all failed (%s); draining instead%n", e);
+			LOG.log(System.Logger.Level.WARNING, "resign-all failed; draining instead", e);
 		}
 		return false;
 	}

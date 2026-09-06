@@ -258,8 +258,7 @@ class ResignAndShutdownTest {
 		}
 	}
 
-	private static void await(java.util.function.BooleanSupplier condition, String message)
-			throws InterruptedException {
+	private static void await(java.util.function.BooleanSupplier condition, String message) {
 		var deadline = System.nanoTime() + java.time.Duration.ofSeconds(5).toNanos();
 		while (System.nanoTime() < deadline) {
 			if (condition.getAsBoolean()) {

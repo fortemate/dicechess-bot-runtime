@@ -52,7 +52,10 @@ public final class WebhookHandler {
 	private static final String VARIANT_FISCHER = "Fischer";
 
 	private static final String MEMBER_RESIGN = "resign";
+	private static final String RESIGN_POLICY_REQUIRED = "resignPolicy must not be null";
 	private static final String MEMBER_DECISION_ID = "decisionId";
+	private static final String MEMBER_OFFER_DOUBLE = "offerDouble";
+	private static final String MEMBER_ACCEPT_DOUBLE = "acceptDouble";
 
 	private static final Gson GSON = new Gson();
 	private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
@@ -101,7 +104,7 @@ public final class WebhookHandler {
 		this.keys = WebhookKeys.activeOnly(requiredSecret);
 		this.playApiBaseUrl = playApiBaseUrl == null ? null : stripTrailingSlash(playApiBaseUrl);
 		this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
-		this.resignPolicy = Objects.requireNonNull(resignPolicy, "resignPolicy must not be null");
+		this.resignPolicy = Objects.requireNonNull(resignPolicy, RESIGN_POLICY_REQUIRED);
 	}
 
 	/**
@@ -141,7 +144,7 @@ public final class WebhookHandler {
 		this.keys = Objects.requireNonNull(keys, "keys must not be null");
 		this.playApiBaseUrl = playApiBaseUrl == null ? null : stripTrailingSlash(playApiBaseUrl);
 		this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
-		this.resignPolicy = Objects.requireNonNull(resignPolicy, "resignPolicy must not be null");
+		this.resignPolicy = Objects.requireNonNull(resignPolicy, RESIGN_POLICY_REQUIRED);
 	}
 
 	/**
@@ -158,7 +161,7 @@ public final class WebhookHandler {
 		this.keys = source.keys;
 		this.playApiBaseUrl = source.playApiBaseUrl;
 		this.strategy = source.strategy;
-		this.resignPolicy = Objects.requireNonNull(resignPolicy, "resignPolicy must not be null");
+		this.resignPolicy = Objects.requireNonNull(resignPolicy, RESIGN_POLICY_REQUIRED);
 	}
 
 	/**
@@ -458,6 +461,19 @@ public final class WebhookHandler {
 		return new Response(200, GSON.toJson(body));
 	}
 
+	/**
+	 * The resignation answer to a doubling delivery. Unlike the turn and draw answers, no record models it: both carry
+	 * the episode's {@code decisionId}, which the action records do not hold, so the two answers are built here and
+	 * differ only in which decision member they decline.
+	 */
+	private static Response resigningDoublingAnswer(String decisionId, String declinedMember) {
+		var body = new JsonObject();
+		body.addProperty(MEMBER_DECISION_ID, decisionId);
+		body.addProperty(declinedMember, false);
+		body.addProperty(MEMBER_RESIGN, true);
+		return new Response(200, GSON.toJson(body));
+	}
+
 	private Response doubleOpportunity(JsonObject envelope) {
 		var parsed = parseDecisionState(envelope, false);
 		Validations.requireNoDice(parsed.dfen());
@@ -465,11 +481,7 @@ public final class WebhookHandler {
 		var doubling = parseDoublingState(parsed.state());
 
 		if (resignPolicy.shouldResign()) {
-			var body = new JsonObject();
-			body.addProperty(MEMBER_DECISION_ID, doubling.decision().id());
-			body.addProperty("offerDouble", false);
-			body.addProperty(MEMBER_RESIGN, true);
-			return new Response(200, GSON.toJson(body));
+			return resigningDoublingAnswer(doubling.decision().id(), MEMBER_OFFER_DOUBLE);
 		}
 
 		var context = new DoubleOpportunityContext(
@@ -487,7 +499,7 @@ public final class WebhookHandler {
 
 		var body = new JsonObject();
 		body.addProperty(MEMBER_DECISION_ID, context.decisionId());
-		body.addProperty("offerDouble", action.offerDouble());
+		body.addProperty(MEMBER_OFFER_DOUBLE, action.offerDouble());
 		if (action.isResign()) {
 			body.addProperty(MEMBER_RESIGN, true);
 		}
@@ -501,11 +513,7 @@ public final class WebhookHandler {
 		var doubling = parseDoublingState(parsed.state());
 
 		if (resignPolicy.shouldResign()) {
-			var body = new JsonObject();
-			body.addProperty(MEMBER_DECISION_ID, doubling.decision().id());
-			body.addProperty("acceptDouble", false);
-			body.addProperty(MEMBER_RESIGN, true);
-			return new Response(200, GSON.toJson(body));
+			return resigningDoublingAnswer(doubling.decision().id(), MEMBER_ACCEPT_DOUBLE);
 		}
 
 		var context = new DoubleDecisionContext(
@@ -523,7 +531,7 @@ public final class WebhookHandler {
 
 		var body = new JsonObject();
 		body.addProperty(MEMBER_DECISION_ID, context.decisionId());
-		body.addProperty("acceptDouble", action.acceptDouble());
+		body.addProperty(MEMBER_ACCEPT_DOUBLE, action.acceptDouble());
 		if (action.isResign()) {
 			body.addProperty(MEMBER_RESIGN, true);
 		}
