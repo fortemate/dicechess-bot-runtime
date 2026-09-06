@@ -2,6 +2,24 @@
 
 Agent guidance for the `fortemate/dicechess-bot-runtime` repository.
 
+## Definition of Done — before every commit
+
+<!-- dc-shared:definition-of-done-maven v1 — keep identical across Fortemate Maven repositories -->
+
+1. Format: `mise run format` where the repository defines it (Spotless). If `mise` is not on PATH:
+   `~/.local/bin/mise exec -- mvn --batch-mode spotless:apply`.
+2. Gate: `mise run check` — the same Maven goals CI runs (`verify`, or `spotless:check clean test package`).
+   If part of it cannot run in your sandbox, run at least `mise exec -- mvn --batch-mode -DskipTests test-compile`
+   plus every suite that can run, and list what you skipped in the pull request.
+3. Never publish unformatted Java or code that does not compile: CI rejects both, and every red run costs a
+   review cycle.
+
+Sandboxed agents (Jules): the toolchain is provisioned by `scripts/jules-setup.sh` (Java 25 and Maven via
+mise; the VM image only ships JDK 21). If a tool is missing, run `bash scripts/jules-setup.sh` instead of
+installing tools ad hoc.
+
+<!-- /dc-shared:definition-of-done-maven -->
+
 ## Issue management
 <!-- dc-shared:issue-management v7 — keep identical across Fortemate repositories -->
 
