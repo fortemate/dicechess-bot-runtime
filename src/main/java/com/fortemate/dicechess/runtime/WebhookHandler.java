@@ -51,6 +51,9 @@ public final class WebhookHandler {
 	private static final String SEAT_WHITE = "White";
 	private static final String VARIANT_FISCHER = "Fischer";
 
+	private static final String MEMBER_RESIGN = "resign";
+	private static final String MEMBER_DECISION_ID = "decisionId";
+
 	private static final Gson GSON = new Gson();
 	private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
 	private static final Duration FALLBACK_TIMEOUT = Duration.ofSeconds(5);
@@ -138,6 +141,23 @@ public final class WebhookHandler {
 		this.keys = Objects.requireNonNull(keys, "keys must not be null");
 		this.playApiBaseUrl = playApiBaseUrl == null ? null : stripTrailingSlash(playApiBaseUrl);
 		this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
+		this.resignPolicy = Objects.requireNonNull(resignPolicy, "resignPolicy must not be null");
+	}
+
+	/**
+	 * Creates a handler identical to {@code source} except for its resign policy.
+	 *
+	 * <p>Used to derive a draining handler from a running one without rebuilding, or losing, the keys, the play-api
+	 * base URL and the strategy the application configured.
+	 *
+	 * @param source the handler to copy
+	 * @param resignPolicy the policy the copy consults before strategy dispatch
+	 */
+	public WebhookHandler(WebhookHandler source, ResignPolicy resignPolicy) {
+		Objects.requireNonNull(source, "source must not be null");
+		this.keys = source.keys;
+		this.playApiBaseUrl = source.playApiBaseUrl;
+		this.strategy = source.strategy;
 		this.resignPolicy = Objects.requireNonNull(resignPolicy, "resignPolicy must not be null");
 	}
 
@@ -371,11 +391,9 @@ public final class WebhookHandler {
 		var parsed = parseDecisionState(envelope, true);
 
 		if (resignPolicy.shouldResign()) {
-			var body = new JsonObject();
-			body.add("moves", GSON.toJsonTree(List.of()));
-			body.addProperty("offerDraw", false);
-			body.addProperty("resign", true);
-			return new Response(200, GSON.toJson(body));
+			// The record already models this answer; serializing it keeps the policy path and the strategy path from
+			// drifting into two different wire shapes for the same decision.
+			return new Response(200, GSON.toJson(TurnAction.resign()));
 		}
 
 		var legalMoves = legalMoves(parsed.gameId(), parsed.version(), parsed.dfen(), parsed.state());
@@ -403,7 +421,7 @@ public final class WebhookHandler {
 		body.add("moves", GSON.toJsonTree(action.moves()));
 		body.addProperty("offerDraw", action.offerDraw());
 		if (action.isResign()) {
-			body.addProperty("resign", true);
+			body.addProperty(MEMBER_RESIGN, true);
 		}
 		return new Response(200, GSON.toJson(body));
 	}
@@ -416,10 +434,7 @@ public final class WebhookHandler {
 		}
 
 		if (resignPolicy.shouldResign()) {
-			var body = new JsonObject();
-			body.addProperty("acceptDraw", false);
-			body.addProperty("resign", true);
-			return new Response(200, GSON.toJson(body));
+			return new Response(200, GSON.toJson(DrawAction.resign()));
 		}
 
 		var context = new DrawDecisionContext(
@@ -438,7 +453,7 @@ public final class WebhookHandler {
 		var body = new JsonObject();
 		body.addProperty("acceptDraw", action.acceptDraw());
 		if (action.isResign()) {
-			body.addProperty("resign", true);
+			body.addProperty(MEMBER_RESIGN, true);
 		}
 		return new Response(200, GSON.toJson(body));
 	}
@@ -451,9 +466,9 @@ public final class WebhookHandler {
 
 		if (resignPolicy.shouldResign()) {
 			var body = new JsonObject();
-			body.addProperty("decisionId", doubling.decision().id());
+			body.addProperty(MEMBER_DECISION_ID, doubling.decision().id());
 			body.addProperty("offerDouble", false);
-			body.addProperty("resign", true);
+			body.addProperty(MEMBER_RESIGN, true);
 			return new Response(200, GSON.toJson(body));
 		}
 
@@ -471,10 +486,10 @@ public final class WebhookHandler {
 		}
 
 		var body = new JsonObject();
-		body.addProperty("decisionId", context.decisionId());
+		body.addProperty(MEMBER_DECISION_ID, context.decisionId());
 		body.addProperty("offerDouble", action.offerDouble());
 		if (action.isResign()) {
-			body.addProperty("resign", true);
+			body.addProperty(MEMBER_RESIGN, true);
 		}
 		return new Response(200, GSON.toJson(body));
 	}
@@ -487,9 +502,9 @@ public final class WebhookHandler {
 
 		if (resignPolicy.shouldResign()) {
 			var body = new JsonObject();
-			body.addProperty("decisionId", doubling.decision().id());
+			body.addProperty(MEMBER_DECISION_ID, doubling.decision().id());
 			body.addProperty("acceptDouble", false);
-			body.addProperty("resign", true);
+			body.addProperty(MEMBER_RESIGN, true);
 			return new Response(200, GSON.toJson(body));
 		}
 
@@ -507,10 +522,10 @@ public final class WebhookHandler {
 		}
 
 		var body = new JsonObject();
-		body.addProperty("decisionId", context.decisionId());
+		body.addProperty(MEMBER_DECISION_ID, context.decisionId());
 		body.addProperty("acceptDouble", action.acceptDouble());
 		if (action.isResign()) {
-			body.addProperty("resign", true);
+			body.addProperty(MEMBER_RESIGN, true);
 		}
 		return new Response(200, GSON.toJson(body));
 	}

@@ -38,10 +38,18 @@ public final class CustomHandlerServer {
 
 	private static final String DEFAULT_PATH = "/api/webhook";
 	private static final int DEFAULT_PORT = 8080;
-	private static final String DEFAULT_PLAY_API_BASE_URL = "https://play-api.fortemate.com";
-	private static final long DEFAULT_DRAIN_DEADLINE_SECONDS = 30L;
+	private static final String DEFAULT_PLAY_API_BASE_URL = "https://api.fortemate.com";
 
-	private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
+	/**
+	 * How long drain mode keeps answering deliveries with a resignation before the server stops.
+	 *
+	 * <p>Kept below the stop grace a container runtime allows by default (Docker sends SIGKILL ten seconds after
+	 * SIGTERM): a longer deadline would simply be cut short, turning a clean shutdown into a killed one. Raise it only
+	 * together with the platform's own grace period.
+	 */
+	private static final long DEFAULT_DRAIN_DEADLINE_SECONDS = 8L;
+
+	private static final Duration RESIGN_ALL_TIMEOUT = Duration.ofSeconds(5);
 
 	private CustomHandlerServer() {}
 
@@ -72,7 +80,7 @@ public final class CustomHandlerServer {
 			}
 		}
 
-		attachShutdownHook(server, isDraining, token, baseUrl, drainDeadline, true);
+		attachShutdownHook(server, isDraining, token, baseUrl, drainDeadline);
 		return server;
 	}
 
@@ -106,6 +114,10 @@ public final class CustomHandlerServer {
 		Objects.requireNonNull(isDraining, "isDraining must not be null");
 
 		var server = HttpServer.create(new InetSocketAddress(port), 0);
+		// Derived once, not per delivery: the same keys, base URL and strategy, with a policy that resigns before
+		// dispatch. Rebuilding it per request would allocate needlessly and silently drop whatever configuration the
+		// application gave the original handler.
+		var drainHandler = new WebhookHandler(handler, () -> true);
 		server.createContext(path, exchange -> {
 			try (exchange) {
 				var headers = new HashMap<String, String>();
@@ -116,14 +128,7 @@ public final class CustomHandlerServer {
 				});
 				var rawBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
 
-				WebhookHandler activeHandler;
-				if (isDraining.get()) {
-					activeHandler = new WebhookHandler(
-							handler.keys(), null, context -> TurnAction.resign(), () -> true);
-				} else {
-					activeHandler = handler;
-				}
-
+				var activeHandler = isDraining.get() ? drainHandler : handler;
 				var response = activeHandler.handle(headers, rawBody, Instant.now().getEpochSecond());
 
 				var bytes = response.jsonBody().getBytes(StandardCharsets.UTF_8);
@@ -140,71 +145,88 @@ public final class CustomHandlerServer {
 	}
 
 	/**
-	 * Executes the shutdown procedure.
+	 * Executes the shutdown procedure and reports which path was taken.
 	 *
-	 * <p>When {@code token} is present (non-null and non-blank), executes {@code POST /bot/games/resign-all}
-	 * with {@code {"pauseSeating": true}} and stops the server.
-	 * Without a token, enters drain mode (where incoming deliveries answer with {@code resign: true}) until
-	 * {@code drainDeadlineSeconds} expires, then stops the server.
+	 * <p>With a token, {@code POST /bot/games/resign-all} concedes every game the bot is seated in and pauses its
+	 * seating, which is the only mechanism that reaches a game whose turn is not currently the bot's. A refused or
+	 * unreachable call falls through to drain mode rather than exiting as if the games had been conceded: an expired
+	 * token answers {@code 401}, and silently treating that as success leaves the bot's games running until they flag.
+	 *
+	 * <p>Drain mode answers every further delivery with a resignation until {@code drainDeadlineSeconds} elapses. It is
+	 * best-effort by nature: a game only receives a delivery when it is the bot's turn.
+	 *
+	 * <p>This method never calls {@code System.exit}. It is invoked from a shutdown hook, and {@code Runtime.exit}
+	 * called while the shutdown sequence is already running blocks that thread indefinitely, so the JVM would hang
+	 * until the orchestrator's SIGKILL instead of stopping cleanly.
 	 *
 	 * @param server the server to stop
 	 * @param isDraining the flag controlling drain mode
 	 * @param token the bot token, or {@code null}/blank if unconfigured
 	 * @param baseUrl play-api base URL
 	 * @param drainDeadlineSeconds drain mode timeout in seconds
-	 * @param exitAfterShutdown whether to call {@code System.exit(0)} after completion
+	 * @return which path the shutdown actually took
 	 */
-	public static void executeShutdown(
+	public static ShutdownOutcome executeShutdown(
 			HttpServer server,
 			AtomicBoolean isDraining,
 			String token,
 			String baseUrl,
-			long drainDeadlineSeconds,
-			boolean exitAfterShutdown) {
-		if (token != null && !token.isBlank()) {
-			try {
-				var normalizedUrl = stripTrailingSlash(baseUrl);
-				var uri = URI.create(normalizedUrl + "/bot/games/resign-all");
-				var body = "{\"pauseSeating\":true}";
-				var request = HttpRequest.newBuilder(uri)
-						.header("Authorization", "Bearer " + token)
-						.header("Content-Type", "application/json")
-						.timeout(Duration.ofSeconds(10))
-						.POST(HttpRequest.BodyPublishers.ofString(body))
-						.build();
-				HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.discarding());
-			} catch (InterruptedException e) {
-				Thread.currentThread().interrupt();
-			} catch (Exception _) {
-				// Proceed to stop server
-			}
+			long drainDeadlineSeconds) {
+		Objects.requireNonNull(server, "server must not be null");
+
+		if (token != null && !token.isBlank() && resignAll(token, baseUrl)) {
 			server.stop(0);
-		} else {
-			if (isDraining != null) {
-				isDraining.set(true);
-			}
-			try {
-				Thread.sleep(Math.max(0L, drainDeadlineSeconds * 1000L));
-			} catch (InterruptedException e) {
-				Thread.currentThread().interrupt();
-			}
-			server.stop(0);
+			return ShutdownOutcome.RESIGNED_ALL;
 		}
 
-		if (exitAfterShutdown) {
-			System.exit(0);
+		if (isDraining != null) {
+			isDraining.set(true);
 		}
+		try {
+			Thread.sleep(Math.max(0L, drainDeadlineSeconds * 1000L));
+		} catch (InterruptedException _) {
+			Thread.currentThread().interrupt();
+		}
+		server.stop(0);
+		return ShutdownOutcome.DRAINED;
 	}
 
 	/**
-	 * Attaches a JVM shutdown hook for SIGTERM.
+	 * Concedes every game through play-api. Returns whether the server actually accepted the request; anything else,
+	 * including a transport failure, is reported on {@code System.err} so an operator can tell a conceded shutdown
+	 * from one that only looked like it.
+	 */
+	private static boolean resignAll(String token, String baseUrl) {
+		var uri = URI.create(stripTrailingSlash(baseUrl) + "/bot/games/resign-all");
+		var request = HttpRequest.newBuilder(uri)
+				.header("Authorization", "Bearer " + token)
+				.header("Content-Type", "application/json")
+				.timeout(RESIGN_ALL_TIMEOUT)
+				.POST(HttpRequest.BodyPublishers.ofString("{\"pauseSeating\":true}"))
+				.build();
+		try (var client = HttpClient.newHttpClient()) {
+			var status = client.send(request, HttpResponse.BodyHandlers.discarding()).statusCode();
+			if (status >= 200 && status < 300) {
+				return true;
+			}
+			System.err.printf("[dicechess] resign-all answered HTTP %d; draining instead%n", status);
+		} catch (InterruptedException _) {
+			Thread.currentThread().interrupt();
+			System.err.println("[dicechess] resign-all was interrupted; draining instead");
+		} catch (IOException | RuntimeException e) {
+			System.err.printf("[dicechess] resign-all failed (%s); draining instead%n", e);
+		}
+		return false;
+	}
+
+	/**
+	 * Attaches a JVM shutdown hook that runs {@link #executeShutdown} on SIGTERM.
 	 *
 	 * @param server the server to stop
 	 * @param isDraining the flag controlling drain mode
 	 * @param token the bot token, or {@code null}/blank if unconfigured
 	 * @param baseUrl play-api base URL
 	 * @param drainDeadlineSeconds drain mode timeout in seconds
-	 * @param exitAfterShutdown whether to call {@code System.exit(0)} after completion
 	 * @return the attached shutdown hook thread
 	 */
 	public static Thread attachShutdownHook(
@@ -212,12 +234,20 @@ public final class CustomHandlerServer {
 			AtomicBoolean isDraining,
 			String token,
 			String baseUrl,
-			long drainDeadlineSeconds,
-			boolean exitAfterShutdown) {
-		var hook = new Thread(
-				() -> executeShutdown(server, isDraining, token, baseUrl, drainDeadlineSeconds, exitAfterShutdown));
+			long drainDeadlineSeconds) {
+		var hook = new Thread(() -> executeShutdown(server, isDraining, token, baseUrl, drainDeadlineSeconds));
 		Runtime.getRuntime().addShutdownHook(hook);
 		return hook;
+	}
+
+	/** Which path {@link #executeShutdown} took. */
+	public enum ShutdownOutcome {
+
+		/** play-api accepted {@code POST /bot/games/resign-all}; every game was conceded. */
+		RESIGNED_ALL,
+
+		/** No token, or the call did not succeed: further deliveries were answered with a resignation instead. */
+		DRAINED
 	}
 
 	private static String stripTrailingSlash(String url) {

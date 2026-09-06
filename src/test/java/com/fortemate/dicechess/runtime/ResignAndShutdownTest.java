@@ -3,8 +3,6 @@ package com.fortemate.dicechess.runtime;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -203,13 +201,73 @@ class ResignAndShutdownTest {
 			var handler = new WebhookHandler(SECRET, context -> new TurnAction(List.of()));
 			var server = CustomHandlerServer.start(0, "/api/webhook", handler);
 
-			CustomHandlerServer.executeShutdown(server, new AtomicBoolean(false), "secret-bot-token-123", baseUrl, 0L, false);
+			var outcome = CustomHandlerServer.executeShutdown(
+					server, new AtomicBoolean(false), "secret-bot-token-123", baseUrl, 0L);
 
+			assertThat(outcome).isEqualTo(CustomHandlerServer.ShutdownOutcome.RESIGNED_ALL);
 			assertThat(authHeader.get()).isEqualTo("Bearer secret-bot-token-123");
 			assertThat(requestBody.get()).isEqualTo("{\"pauseSeating\":true}");
 		} finally {
 			fakePlayApi.stop(0);
 		}
+	}
+
+	@Test
+	void shutdownFallsBackToDrainWhenResignAllIsRefused() throws Exception {
+		// An expired token answers 401. Treating that as success would exit reporting games conceded that are still
+		// running, so the refusal must fall through to drain mode instead.
+		var fakePlayApi = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress(0), 0);
+		fakePlayApi.createContext("/bot/games/resign-all", exchange -> {
+			exchange.sendResponseHeaders(401, -1);
+			exchange.close();
+		});
+		fakePlayApi.start();
+
+		try {
+			var baseUrl = "http://127.0.0.1:" + fakePlayApi.getAddress().getPort();
+			var handler = new WebhookHandler(SECRET, context -> new TurnAction(List.of()));
+			var isDraining = new AtomicBoolean(false);
+			var server = CustomHandlerServer.start(0, "/api/webhook", handler, isDraining);
+
+			var outcome = CustomHandlerServer.executeShutdown(server, isDraining, "expired-token", baseUrl, 0L);
+
+			assertThat(outcome).isEqualTo(CustomHandlerServer.ShutdownOutcome.DRAINED);
+			assertThat(isDraining.get()).isTrue();
+		} finally {
+			fakePlayApi.stop(0);
+		}
+	}
+
+	@Test
+	void shutdownHookBodyTerminatesInsteadOfHaltingTheJvm() throws Exception {
+		// A hook that ends in System.exit blocks forever, because Runtime.exit called while the shutdown sequence is
+		// already running never returns; the JVM would then hang until SIGKILL. Running the hook body here must
+		// simply finish — and must not take this test JVM down with it.
+		var handler = new WebhookHandler(SECRET, context -> new TurnAction(List.of()));
+		var server = CustomHandlerServer.start(0, "/api/webhook", handler);
+		var hook = CustomHandlerServer.attachShutdownHook(server, new AtomicBoolean(false), null, "http://localhost", 0L);
+
+		try {
+			hook.start();
+			hook.join(5000);
+
+			assertThat(hook.isAlive()).isFalse();
+		} finally {
+			Runtime.getRuntime().removeShutdownHook(hook);
+			server.stop(0);
+		}
+	}
+
+	private static void await(java.util.function.BooleanSupplier condition, String message)
+			throws InterruptedException {
+		var deadline = System.nanoTime() + java.time.Duration.ofSeconds(5).toNanos();
+		while (System.nanoTime() < deadline) {
+			if (condition.getAsBoolean()) {
+				return;
+			}
+			Thread.onSpinWait();
+		}
+		throw new AssertionError(message);
 	}
 
 	@Test
@@ -223,17 +281,18 @@ class ResignAndShutdownTest {
 			var normalResp = handler.handle(signedHeaders(MINIMAL_TURN, NOW), MINIMAL_TURN, NOW);
 			assertThat(normalResp.jsonBody()).isEqualTo("{\"moves\":[\"e2e4\"],\"offerDraw\":false}");
 
-			// Execute shutdown in background thread without bot token and 1s drain
-			var shutdownThread = new Thread(() ->
-					CustomHandlerServer.executeShutdown(server, isDraining, null, "http://localhost", 1L, false));
+			// Execute shutdown in a background thread without a bot token and a 1s drain.
+			var outcome = new AtomicReference<CustomHandlerServer.ShutdownOutcome>();
+			var shutdownThread = new Thread(() -> outcome.set(
+					CustomHandlerServer.executeShutdown(server, isDraining, null, "http://localhost", 1L)));
 			shutdownThread.start();
 
-			// Give thread moment to set isDraining
-			Thread.sleep(100);
-			assertThat(isDraining.get()).isTrue();
+			// Poll rather than sleep a guessed interval: on a loaded runner a fixed wait races the flag.
+			await(isDraining::get, "drain mode was never entered");
 
-			shutdownThread.join(3000);
+			shutdownThread.join(5000);
 			assertThat(shutdownThread.isAlive()).isFalse();
+			assertThat(outcome.get()).isEqualTo(CustomHandlerServer.ShutdownOutcome.DRAINED);
 		} finally {
 			server.stop(0);
 		}

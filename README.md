@@ -104,11 +104,17 @@ When using `CustomHandlerServer.startFromEnvironment(handler)`, the server autom
 shutdown hook to handle SIGTERM cleanly:
 
 - **With `DICECHESS_BOT_TOKEN` configured:** The runtime sends a `POST /bot/games/resign-all` request
-  to play-api (or `DICECHESS_PLAY_API_BASE_URL`, default `https://play-api.fortemate.com`) with
+  to play-api (or `DICECHESS_PLAY_API_BASE_URL`, default `https://api.fortemate.com`) with
   `Authorization: Bearer <token>` and payload `{"pauseSeating": true}`, then shuts down immediately.
-- **Without `DICECHESS_BOT_TOKEN` configured:** The runtime enters drain mode for a configurable deadline
-  (`DICECHESS_DRAIN_DEADLINE_SECONDS`, default `30`). During drain mode, every incoming delivery is answered with
-  `{"resign": true}` without invoking the strategy before server shutdown.
+- **Without `DICECHESS_BOT_TOKEN`, or when the call is refused:** The runtime enters drain mode for a configurable
+  deadline (`DICECHESS_DRAIN_DEADLINE_SECONDS`, default `8`), answering every further delivery with
+  `{"resign": true}` without invoking the strategy, then stops the server. Drain mode is best-effort by nature: a
+  game is only reached when it is the bot's turn, which is why the token path exists. Keep the deadline below your
+  platform's stop grace — Docker sends SIGKILL ten seconds after SIGTERM by default — or raise both together.
+
+A refused `resign-all` (an expired token answers `401`) is reported on standard error and falls through to drain
+rather than exiting as if the games had been conceded. `CustomHandlerServer.executeShutdown` returns which path it
+took.
 
 ### Stake doubling decisions
 
@@ -169,7 +175,7 @@ base URL to the other `WebhookHandler` constructor and a capped inline tree is f
 public `GET /games/{id}/moves` endpoint automatically:
 
 ```java
-WebhookHandler handler = new WebhookHandler(secret, "https://play-api.fortemate.com", strategy);
+WebhookHandler handler = new WebhookHandler(secret, "https://api.fortemate.com", strategy);
 ```
 
 `DrawDecisionContext` deliberately contains no legal moves or dice-dependent data. It carries only
