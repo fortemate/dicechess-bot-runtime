@@ -1,5 +1,6 @@
 package com.fortemate.dicechess.runtime;
 
+import com.google.gson.annotations.SerializedName;
 import java.util.List;
 import java.util.Objects;
 
@@ -9,8 +10,12 @@ import java.util.Objects;
  * @param moves the complete sequence of UCI micro-moves; an empty list plays nothing and is not a
  *     forced-pass command
  * @param offerDraw whether to offer a draw together with the completed turn
+ * @param isResign whether to resign the game
  */
-public record TurnAction(List<String> moves, boolean offerDraw) {
+public record TurnAction(
+		List<String> moves,
+		boolean offerDraw,
+		@SerializedName("resign") boolean isResign) {
 
 	/**
 	 * Creates an immutable turn action.
@@ -23,11 +28,30 @@ public record TurnAction(List<String> moves, boolean offerDraw) {
 	}
 
 	/**
-	 * Creates a turn action that does not offer a draw.
+	 * Creates a turn action that does not offer a draw and does not resign.
 	 *
 	 * @param moves the complete sequence of UCI micro-moves
 	 */
 	public TurnAction(List<String> moves) {
-		this(moves, false);
+		this(moves, false, false);
+	}
+
+	/**
+	 * Creates a turn action that does not resign.
+	 *
+	 * @param moves the complete sequence of UCI micro-moves
+	 * @param offerDraw whether to offer a draw together with the completed turn
+	 */
+	public TurnAction(List<String> moves, boolean offerDraw) {
+		this(moves, offerDraw, false);
+	}
+
+	/**
+	 * Returns a turn action that resigns the game.
+	 *
+	 * @return a resigning turn action
+	 */
+	public static TurnAction resign() {
+		return new TurnAction(List.of(), false, true);
 	}
 }

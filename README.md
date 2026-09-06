@@ -25,12 +25,13 @@ server-provided legal turns, or the game clock.
 | `Signatures` | HMAC-SHA256 sign/verify, ±5 minute replay window, constant-time comparison. |
 | `WebhookKeys` | Immutable active and pending secret configuration for zero-downtime rotation. |
 | `BotStrategy` | One required `onTurn` callback plus safe default methods for optional decisions. |
-| `TurnContext` / `TurnAction` | The signed turn input and the exact `moves` / `offerDraw` response. |
-| `DrawDecisionContext` / `DrawAction` | A dice-free draw decision and its exact `acceptDraw` response. |
-| `DoubleOpportunityContext` / `DoubleOfferAction` | A dice-free double opportunity and its exact `decisionId` / `offerDouble` response. |
-| `DoubleDecisionContext` / `DoubleResponseAction` | A dice-free double response decision and its exact `decisionId` / `acceptDouble` response. |
+| `TurnContext` / `TurnAction` | The signed turn input and the exact `moves` / `offerDraw` / `resign` response. |
+| `DrawDecisionContext` / `DrawAction` | A dice-free draw decision and its exact `acceptDraw` / `resign` response. |
+| `DoubleOpportunityContext` / `DoubleOfferAction` | A dice-free double opportunity and its exact `decisionId` / `offerDouble` / `resign` response. |
+| `DoubleDecisionContext` / `DoubleResponseAction` | A dice-free double response decision and its exact `decisionId` / `acceptDouble` / `resign` response. |
 | `DoublingState` / `DoublingDecision` | Public stake and cube state, multipliers, and typed doubling decision representation. |
 | `GameClock` | The mover's and opponent's remaining milliseconds, plus a nullable Fischer increment. |
+| `ResignPolicy` | Pre-dispatch policy interface (`shouldResign()`) allowing global or condition-based resignation without invoking the strategy. |
 | `WebhookHandler` | Orchestrates ownership verification, signature checks, typed parsing, and strategy dispatch with bounded request errors. |
 | `CustomHandlerServer` | A JDK `HttpServer` wrapper reading `FUNCTIONS_CUSTOMHANDLER_PORT` — optional; bring your own HTTP layer if you'd rather. |
 | `JsonFiles` | Generic JSON-object-of-strings file loader (an opening book, or any similar lookup table), degrades gracefully when the file is absent. |
@@ -80,6 +81,34 @@ dice and sends the normal `yourTurn` delivery. With it, play-api first sends a d
 `drawDecision`. The default `onDrawDecision` returns `DrawAction.decline()`, so adopting v2 never
 silently opts a bot into accepting draws. Offering a draw is a turn action and defaults to false;
 check `TurnContext.mayOfferDraw()` before requesting one.
+
+### Resignation actions and `ResignPolicy`
+
+Every delivery answer accepts a resignation. Strategy callbacks can return `TurnAction.resign()`,
+`DrawAction.resign()`, `DoubleOfferAction.resign()`, or `DoubleResponseAction.resign()`. All factory
+methods serialize `{"resign": true}` alongside safe defaults for remaining members (`moves: []`,
+`offerDraw: false`, `acceptDraw: false`, `offerDouble: false`, `acceptDouble: false`).
+
+A `ResignPolicy` can also be passed to `WebhookHandler` to be consulted before strategy dispatch
+on all four delivery types. When `resignPolicy.shouldResign()` returns `true`, the handler immediately
+answers `{"resign": true}` without calling the strategy:
+
+```java
+ResignPolicy resignPolicy = () -> shouldDrainOrShutdown;
+WebhookHandler handler = new WebhookHandler(keys, null, strategy, resignPolicy);
+```
+
+### Shutdown path and SIGTERM handling
+
+When using `CustomHandlerServer.startFromEnvironment(handler)`, the server automatically registers a JVM
+shutdown hook to handle SIGTERM cleanly:
+
+- **With `DICECHESS_BOT_TOKEN` configured:** The runtime sends a `POST /bot/games/resign-all` request
+  to play-api (or `DICECHESS_PLAY_API_BASE_URL`, default `https://play-api.fortemate.com`) with
+  `Authorization: Bearer <token>` and payload `{"pauseSeating": true}`, then shuts down immediately.
+- **Without `DICECHESS_BOT_TOKEN` configured:** The runtime enters drain mode for a configurable deadline
+  (`DICECHESS_DRAIN_DEADLINE_SECONDS`, default `30`). During drain mode, every incoming delivery is answered with
+  `{"resign": true}` without invoking the strategy before server shutdown.
 
 ### Stake doubling decisions
 

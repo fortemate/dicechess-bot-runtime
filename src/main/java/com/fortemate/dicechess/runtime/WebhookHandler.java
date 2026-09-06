@@ -58,6 +58,7 @@ public final class WebhookHandler {
 	private final WebhookKeys keys;
 	private final String playApiBaseUrl;
 	private final BotStrategy strategy;
+	private final ResignPolicy resignPolicy;
 
 	/**
 	 * Creates a handler with a single active secret and without the {@code GET /games/{id}/moves} fallback.
@@ -66,7 +67,7 @@ public final class WebhookHandler {
 	 * @param strategy the decision-oriented bot strategy
 	 */
 	public WebhookHandler(String secret, BotStrategy strategy) {
-		this(secret, null, strategy);
+		this(secret, null, strategy, ResignPolicy.NEVER);
 	}
 
 	/**
@@ -78,6 +79,18 @@ public final class WebhookHandler {
 	 * @param strategy the decision-oriented bot strategy
 	 */
 	public WebhookHandler(String secret, String playApiBaseUrl, BotStrategy strategy) {
+		this(secret, playApiBaseUrl, strategy, ResignPolicy.NEVER);
+	}
+
+	/**
+	 * Creates a handler with a single active secret and custom resign policy.
+	 *
+	 * @param secret the webhook secret issued by the platform
+	 * @param playApiBaseUrl play-api's base URL; a trailing slash is tolerated
+	 * @param strategy the decision-oriented bot strategy
+	 * @param resignPolicy the policy consulted before strategy dispatch
+	 */
+	public WebhookHandler(String secret, String playApiBaseUrl, BotStrategy strategy, ResignPolicy resignPolicy) {
 		var requiredSecret = Objects.requireNonNull(secret, "secret must not be null");
 		if (requiredSecret.isBlank()) {
 			throw new IllegalArgumentException("secret must not be blank");
@@ -85,6 +98,7 @@ public final class WebhookHandler {
 		this.keys = WebhookKeys.activeOnly(requiredSecret);
 		this.playApiBaseUrl = playApiBaseUrl == null ? null : stripTrailingSlash(playApiBaseUrl);
 		this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
+		this.resignPolicy = Objects.requireNonNull(resignPolicy, "resignPolicy must not be null");
 	}
 
 	/**
@@ -95,7 +109,7 @@ public final class WebhookHandler {
 	 * @param strategy the decision-oriented bot strategy
 	 */
 	public WebhookHandler(WebhookKeys keys, BotStrategy strategy) {
-		this(keys, null, strategy);
+		this(keys, null, strategy, ResignPolicy.NEVER);
 	}
 
 	/**
@@ -108,9 +122,23 @@ public final class WebhookHandler {
 	 * @param strategy the decision-oriented bot strategy
 	 */
 	public WebhookHandler(WebhookKeys keys, String playApiBaseUrl, BotStrategy strategy) {
+		this(keys, playApiBaseUrl, strategy, ResignPolicy.NEVER);
+	}
+
+	/**
+	 * Creates a handler with an immutable key configuration and custom resign policy.
+	 *
+	 * @param keys the active and/or pending webhook keys
+	 * @param playApiBaseUrl play-api's base URL; a trailing slash is tolerated
+	 * @param strategy the decision-oriented bot strategy
+	 * @param resignPolicy the policy consulted before strategy dispatch
+	 */
+	public WebhookHandler(
+			WebhookKeys keys, String playApiBaseUrl, BotStrategy strategy, ResignPolicy resignPolicy) {
 		this.keys = Objects.requireNonNull(keys, "keys must not be null");
 		this.playApiBaseUrl = playApiBaseUrl == null ? null : stripTrailingSlash(playApiBaseUrl);
 		this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
+		this.resignPolicy = Objects.requireNonNull(resignPolicy, "resignPolicy must not be null");
 	}
 
 	/**
@@ -120,6 +148,15 @@ public final class WebhookHandler {
 	 */
 	public WebhookKeys keys() {
 		return keys;
+	}
+
+	/**
+	 * Returns the resign policy used by this handler.
+	 *
+	 * @return the resign policy
+	 */
+	public ResignPolicy resignPolicy() {
+		return resignPolicy;
 	}
 
 	/**
@@ -332,6 +369,15 @@ public final class WebhookHandler {
 
 	private Response yourTurn(JsonObject envelope) {
 		var parsed = parseDecisionState(envelope, true);
+
+		if (resignPolicy.shouldResign()) {
+			var body = new JsonObject();
+			body.add("moves", GSON.toJsonTree(List.of()));
+			body.addProperty("offerDraw", false);
+			body.addProperty("resign", true);
+			return new Response(200, GSON.toJson(body));
+		}
+
 		var legalMoves = legalMoves(parsed.gameId(), parsed.version(), parsed.dfen(), parsed.state());
 		var mayOfferDraw = optionalBooleanTrue(parsed.state(), "mayOfferDraw");
 		var context = new TurnContext(
@@ -356,6 +402,9 @@ public final class WebhookHandler {
 		var body = new JsonObject();
 		body.add("moves", GSON.toJsonTree(action.moves()));
 		body.addProperty("offerDraw", action.offerDraw());
+		if (action.isResign()) {
+			body.addProperty("resign", true);
+		}
 		return new Response(200, GSON.toJson(body));
 	}
 
@@ -365,6 +414,14 @@ public final class WebhookHandler {
 		if (!requiredBoolean(drawOffer, "pending")) {
 			throw new IllegalArgumentException("draw offer is not pending");
 		}
+
+		if (resignPolicy.shouldResign()) {
+			var body = new JsonObject();
+			body.addProperty("acceptDraw", false);
+			body.addProperty("resign", true);
+			return new Response(200, GSON.toJson(body));
+		}
+
 		var context = new DrawDecisionContext(
 				parsed.gameId(), parsed.seat(), parsed.version(), parsed.dfen(), parsed.clock());
 
@@ -380,6 +437,9 @@ public final class WebhookHandler {
 
 		var body = new JsonObject();
 		body.addProperty("acceptDraw", action.acceptDraw());
+		if (action.isResign()) {
+			body.addProperty("resign", true);
+		}
 		return new Response(200, GSON.toJson(body));
 	}
 
@@ -388,6 +448,15 @@ public final class WebhookHandler {
 		Validations.requireNoDice(parsed.dfen());
 		requireNullOrAbsentLegalMoves(parsed.state());
 		var doubling = parseDoublingState(parsed.state());
+
+		if (resignPolicy.shouldResign()) {
+			var body = new JsonObject();
+			body.addProperty("decisionId", doubling.decision().id());
+			body.addProperty("offerDouble", false);
+			body.addProperty("resign", true);
+			return new Response(200, GSON.toJson(body));
+		}
+
 		var context = new DoubleOpportunityContext(
 				parsed.gameId(), parsed.seat(), parsed.version(), parsed.dfen(), parsed.clock(), doubling);
 
@@ -404,6 +473,9 @@ public final class WebhookHandler {
 		var body = new JsonObject();
 		body.addProperty("decisionId", context.decisionId());
 		body.addProperty("offerDouble", action.offerDouble());
+		if (action.isResign()) {
+			body.addProperty("resign", true);
+		}
 		return new Response(200, GSON.toJson(body));
 	}
 
@@ -412,6 +484,15 @@ public final class WebhookHandler {
 		Validations.requireNoDice(parsed.dfen());
 		requireNullOrAbsentLegalMoves(parsed.state());
 		var doubling = parseDoublingState(parsed.state());
+
+		if (resignPolicy.shouldResign()) {
+			var body = new JsonObject();
+			body.addProperty("decisionId", doubling.decision().id());
+			body.addProperty("acceptDouble", false);
+			body.addProperty("resign", true);
+			return new Response(200, GSON.toJson(body));
+		}
+
 		var context = new DoubleDecisionContext(
 				parsed.gameId(), parsed.seat(), parsed.version(), parsed.dfen(), parsed.clock(), doubling);
 
@@ -428,6 +509,9 @@ public final class WebhookHandler {
 		var body = new JsonObject();
 		body.addProperty("decisionId", context.decisionId());
 		body.addProperty("acceptDouble", action.acceptDouble());
+		if (action.isResign()) {
+			body.addProperty("resign", true);
+		}
 		return new Response(200, GSON.toJson(body));
 	}
 
