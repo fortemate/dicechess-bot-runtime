@@ -38,6 +38,9 @@ public final class WebhookHandler {
 	/** Header carrying the hex HMAC-SHA256 signature (see {@link Signatures}). */
 	public static final String SIGNATURE_HEADER = "x-dicechess-signature";
 
+	/** The default play-api base URL used when none is explicitly provided. */
+	public static final String DEFAULT_PLAY_API_BASE_URL = "https://api.fortemate.com";
+
 	private static final String FIELD_CLOCKS = "clocks";
 	private static final String FIELD_LEGAL_MOVES = "legalMoves";
 	private static final String FIELD_TIME_CONTROL = "timeControl";
@@ -67,21 +70,23 @@ public final class WebhookHandler {
 	private final ResignPolicy resignPolicy;
 
 	/**
-	 * Creates a handler with a single active secret and without the {@code GET /games/{id}/moves} fallback.
+	 * Creates a handler with a single active secret, using {@value #DEFAULT_PLAY_API_BASE_URL} to fetch legal moves
+	 * when a turn's inline tree is null.
 	 *
 	 * @param secret the webhook secret issued by the platform
 	 * @param strategy the decision-oriented bot strategy
 	 */
 	public WebhookHandler(String secret, BotStrategy strategy) {
-		this(secret, null, strategy, ResignPolicy.NEVER);
+		this(secret, DEFAULT_PLAY_API_BASE_URL, strategy, ResignPolicy.NEVER);
 	}
 
 	/**
-	 * Creates a handler with a single active secret that fetches {@code GET /games/{id}/moves} when a
-	 * turn's inline move tree is capped. The fallback endpoint is public and needs no additional credential.
+	 * Creates a handler with a single active secret that fetches {@code GET /games/{id}/moves} from an explicit
+	 * base URL when a turn's inline move tree is null. The endpoint is public and needs no additional credential.
 	 *
 	 * @param secret the webhook secret issued by the platform
-	 * @param playApiBaseUrl play-api's base URL; a trailing slash is tolerated
+	 * @param playApiBaseUrl play-api's base URL (defaults to {@value #DEFAULT_PLAY_API_BASE_URL} if null);
+	 *     a trailing slash is tolerated
 	 * @param strategy the decision-oriented bot strategy
 	 */
 	public WebhookHandler(String secret, String playApiBaseUrl, BotStrategy strategy) {
@@ -89,10 +94,11 @@ public final class WebhookHandler {
 	}
 
 	/**
-	 * Creates a handler with a single active secret and custom resign policy.
+	 * Creates a handler with a single active secret, play-api base URL, and custom resign policy.
 	 *
 	 * @param secret the webhook secret issued by the platform
-	 * @param playApiBaseUrl play-api's base URL; a trailing slash is tolerated
+	 * @param playApiBaseUrl play-api's base URL (defaults to {@value #DEFAULT_PLAY_API_BASE_URL} if null);
+	 *     a trailing slash is tolerated
 	 * @param strategy the decision-oriented bot strategy
 	 * @param resignPolicy the policy consulted before strategy dispatch
 	 */
@@ -102,29 +108,30 @@ public final class WebhookHandler {
 			throw new IllegalArgumentException("secret must not be blank");
 		}
 		this.keys = WebhookKeys.activeOnly(requiredSecret);
-		this.playApiBaseUrl = playApiBaseUrl == null ? null : stripTrailingSlash(playApiBaseUrl);
+		this.playApiBaseUrl = normalizeBaseUrl(playApiBaseUrl);
 		this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
 		this.resignPolicy = Objects.requireNonNull(resignPolicy, RESIGN_POLICY_REQUIRED);
 	}
 
 	/**
-	 * Creates a handler with an immutable key configuration and without the
-	 * {@code GET /games/{id}/moves} fallback.
+	 * Creates a handler with an immutable key configuration, using {@value #DEFAULT_PLAY_API_BASE_URL} to fetch legal
+	 * moves when a turn's inline tree is null.
 	 *
 	 * @param keys the active and/or pending webhook keys
 	 * @param strategy the decision-oriented bot strategy
 	 */
 	public WebhookHandler(WebhookKeys keys, BotStrategy strategy) {
-		this(keys, null, strategy, ResignPolicy.NEVER);
+		this(keys, DEFAULT_PLAY_API_BASE_URL, strategy, ResignPolicy.NEVER);
 	}
 
 	/**
-	 * Creates a handler with an immutable key configuration that fetches
-	 * {@code GET /games/{id}/moves} when a turn's inline move tree is capped. The fallback
-	 * endpoint is public and needs no additional credential.
+	 * Creates a handler with an immutable key configuration that fetches {@code GET /games/{id}/moves} from an
+	 * explicit base URL when a turn's inline move tree is null. The endpoint is public and needs no additional
+	 * credential.
 	 *
 	 * @param keys the active and/or pending webhook keys
-	 * @param playApiBaseUrl play-api's base URL; a trailing slash is tolerated
+	 * @param playApiBaseUrl play-api's base URL (defaults to {@value #DEFAULT_PLAY_API_BASE_URL} if null);
+	 *     a trailing slash is tolerated
 	 * @param strategy the decision-oriented bot strategy
 	 */
 	public WebhookHandler(WebhookKeys keys, String playApiBaseUrl, BotStrategy strategy) {
@@ -132,17 +139,18 @@ public final class WebhookHandler {
 	}
 
 	/**
-	 * Creates a handler with an immutable key configuration and custom resign policy.
+	 * Creates a handler with an immutable key configuration, play-api base URL, and custom resign policy.
 	 *
 	 * @param keys the active and/or pending webhook keys
-	 * @param playApiBaseUrl play-api's base URL; a trailing slash is tolerated
+	 * @param playApiBaseUrl play-api's base URL (defaults to {@value #DEFAULT_PLAY_API_BASE_URL} if null);
+	 *     a trailing slash is tolerated
 	 * @param strategy the decision-oriented bot strategy
 	 * @param resignPolicy the policy consulted before strategy dispatch
 	 */
 	public WebhookHandler(
 			WebhookKeys keys, String playApiBaseUrl, BotStrategy strategy, ResignPolicy resignPolicy) {
 		this.keys = Objects.requireNonNull(keys, "keys must not be null");
-		this.playApiBaseUrl = playApiBaseUrl == null ? null : stripTrailingSlash(playApiBaseUrl);
+		this.playApiBaseUrl = normalizeBaseUrl(playApiBaseUrl);
 		this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
 		this.resignPolicy = Objects.requireNonNull(resignPolicy, RESIGN_POLICY_REQUIRED);
 	}
@@ -399,7 +407,7 @@ public final class WebhookHandler {
 			return new Response(200, GSON.toJson(TurnAction.resign()));
 		}
 
-		var legalMoves = legalMoves(parsed.gameId(), parsed.version(), parsed.dfen(), parsed.state());
+		var legalMoves = legalMoves(parsed.gameId(), parsed.version(), parsed.dfen(), parsed.state(), parsed.clock());
 		var mayOfferDraw = optionalBooleanTrue(parsed.state(), "mayOfferDraw");
 		var context = new TurnContext(
 				parsed.gameId(),
@@ -554,13 +562,14 @@ public final class WebhookHandler {
 
 	/** Null intentionally distinguishes unknown moves from a confirmed empty auto-pass tree. */
 	@SuppressWarnings("java:S1168")
-	private List<List<String>> legalMoves(String gameId, long version, String dfen, JsonObject state) {
+	private List<List<String>> legalMoves(
+			String gameId, long version, String dfen, JsonObject state, GameClock clock) {
 		if (!state.has(FIELD_LEGAL_MOVES)) {
 			return null;
 		}
 		var element = state.get(FIELD_LEGAL_MOVES);
 		if (element.isJsonNull()) {
-			return playApiBaseUrl == null ? null : fetchLegalMoves(gameId, version, dfen);
+			return fetchLegalMovesWithRetry(gameId, version, dfen, clock);
 		}
 		if (!element.isJsonObject()) {
 			throw new IllegalArgumentException(FIELD_LEGAL_MOVES + " must be an object or null");
@@ -583,12 +592,48 @@ public final class WebhookHandler {
 		return new GameClock(own, opponent, fischerIncrementMillis(state));
 	}
 
-	/** Fetches and flattens the fallback move tree; unavailable data degrades to {@code null}. */
+	/**
+	 * Fetches and flattens the fallback move tree, retrying once if the first attempt fails and time remains before the
+	 * turn deadline. Unavailable or stale data degrades to {@code null}.
+	 */
 	@SuppressWarnings("java:S1168")
-	private List<List<String>> fetchLegalMoves(String gameId, long expectedVersion, String expectedDfen) {
+	private List<List<String>> fetchLegalMovesWithRetry(
+			String gameId, long expectedVersion, String expectedDfen, GameClock clock) {
+		Long deadlineNanos = clock == null ? null : System.nanoTime() + clock.remainingMillis() * 1_000_000L;
+		var firstTimeout = calculateTimeout(deadlineNanos);
+		if (firstTimeout == null) {
+			return null;
+		}
+		var moves = fetchLegalMovesOnce(gameId, expectedVersion, expectedDfen, firstTimeout);
+		if (moves != null) {
+			return moves;
+		}
+		// Retry once if time remains before the turn deadline
+		var retryTimeout = calculateTimeout(deadlineNanos);
+		if (retryTimeout == null) {
+			return null;
+		}
+		return fetchLegalMovesOnce(gameId, expectedVersion, expectedDfen, retryTimeout);
+	}
+
+	private static Duration calculateTimeout(Long deadlineNanos) {
+		if (deadlineNanos == null) {
+			return FALLBACK_TIMEOUT;
+		}
+		var remainingNanos = deadlineNanos - System.nanoTime();
+		if (remainingNanos <= 0) {
+			return null;
+		}
+		var remainingDuration = Duration.ofNanos(remainingNanos);
+		return remainingDuration.compareTo(FALLBACK_TIMEOUT) < 0 ? remainingDuration : FALLBACK_TIMEOUT;
+	}
+
+	@SuppressWarnings("java:S1168")
+	private List<List<String>> fetchLegalMovesOnce(
+			String gameId, long expectedVersion, String expectedDfen, Duration timeout) {
 		try {
 			var uri = URI.create(playApiBaseUrl + "/games/" + gameId + "/moves");
-			var request = HttpRequest.newBuilder(uri).timeout(FALLBACK_TIMEOUT).GET().build();
+			var request = HttpRequest.newBuilder(uri).timeout(timeout).GET().build();
 			var response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
 			if (response.statusCode() != 200) {
 				return null;
@@ -783,6 +828,11 @@ public final class WebhookHandler {
 		if (state.has(FIELD_LEGAL_MOVES) && !state.get(FIELD_LEGAL_MOVES).isJsonNull()) {
 			throw new IllegalArgumentException(FIELD_LEGAL_MOVES + " must be null in pre-roll states");
 		}
+	}
+
+	private static String normalizeBaseUrl(String url) {
+		var target = url == null ? DEFAULT_PLAY_API_BASE_URL : url;
+		return stripTrailingSlash(target);
 	}
 
 	private static String stripTrailingSlash(String url) {
