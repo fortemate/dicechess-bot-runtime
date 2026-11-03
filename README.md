@@ -166,16 +166,20 @@ the game clock, the flattened legal turns, and `mayOfferDraw`:
 - `clock` is `null` for an untimed game. Otherwise its remaining values are milliseconds from the
   bot's point of view; `incrementMillis` is non-null only for a Fischer control.
 - `legalMoves` is a list of complete root-to-leaf UCI paths. An empty list means the server is
-  auto-passing, so no bot action is required; `null` means the server did not inline the tree or the
-  fallback fetch failed.
+  auto-passing, so no bot action is required; `null` means the fetch failed or was stale.
 - `mayOfferDraw` is fail-closed: an absent, null, or malformed optional wire field becomes `false`.
 
-A strategy with no engine of its own can pick one path directly from `legalMoves`. Pass play-api's
-base URL to the other `WebhookHandler` constructor and a capped inline tree is fetched from the
-public `GET /games/{id}/moves` endpoint automatically:
+A strategy with no engine of its own can pick one path directly from `legalMoves`. Whenever the
+inline tree is `null`, the runtime fetches the tree from the public `GET /games/{id}/moves` endpoint
+automatically (defaulting to `https://api.fortemate.com`), retrying once if time remains before the
+turn deadline:
 
 ```java
-WebhookHandler handler = new WebhookHandler(secret, "https://api.fortemate.com", strategy);
+// Uses default base URL https://api.fortemate.com
+WebhookHandler handler = new WebhookHandler(secret, strategy);
+
+// Or pass an explicit play-api base URL to override the default
+WebhookHandler customHandler = new WebhookHandler(secret, "https://play-api-custom.fortemate.com", strategy);
 ```
 
 `DrawDecisionContext` deliberately contains no legal moves or dice-dependent data. It carries only

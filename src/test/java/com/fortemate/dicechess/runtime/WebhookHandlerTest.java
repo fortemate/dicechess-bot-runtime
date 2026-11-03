@@ -287,6 +287,170 @@ class WebhookHandlerTest {
 	}
 
 	@Test
+	void aNullInlineTreeReachesStrategyWithFetchedTreeUnderEveryPublicConstructor() throws IOException {
+		var fallback = "{\"version\":1,\"dfen\":\"x\",\"dicePending\":true,\"legalMoves\":{\"e2e4\":{}}}";
+		var server = stubMovesEndpoint("g1", fallback, new AtomicInteger());
+		try {
+			var baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
+			var keys = WebhookKeys.activeOnly(SECRET);
+
+			// Constructors tested with explicit URL:
+			// 1. WebhookHandler(String, String, BotStrategy)
+			var seen1 = new AtomicReference<TurnContext>();
+			var h1 = new WebhookHandler(SECRET, baseUrl, ctx -> {
+				seen1.set(ctx);
+				return new TurnAction(List.of());
+			});
+
+			// 2. WebhookHandler(String, String, BotStrategy, ResignPolicy)
+			var seen2 = new AtomicReference<TurnContext>();
+			var h2 = new WebhookHandler(SECRET, baseUrl, ctx -> {
+				seen2.set(ctx);
+				return new TurnAction(List.of());
+			}, ResignPolicy.NEVER);
+
+			// 3. WebhookHandler(WebhookKeys, String, BotStrategy)
+			var seen3 = new AtomicReference<TurnContext>();
+			var h3 = new WebhookHandler(keys, baseUrl, ctx -> {
+				seen3.set(ctx);
+				return new TurnAction(List.of());
+			});
+
+			// 4. WebhookHandler(WebhookKeys, String, BotStrategy, ResignPolicy)
+			var seen4 = new AtomicReference<TurnContext>();
+			var h4 = new WebhookHandler(keys, baseUrl, ctx -> {
+				seen4.set(ctx);
+				return new TurnAction(List.of());
+			}, ResignPolicy.NEVER);
+
+			// 5. Copy constructor WebhookHandler(WebhookHandler, ResignPolicy)
+			var seen5 = new AtomicReference<TurnContext>();
+			var h5 = new WebhookHandler(new WebhookHandler(SECRET, baseUrl, ctx -> {
+				seen5.set(ctx);
+				return new TurnAction(List.of());
+			}), ResignPolicy.NEVER);
+
+			var body = MINIMAL_TURN.replace("}}", ",\"legalMoves\":null}}");
+
+			for (var h : List.of(h1, h2, h3, h4, h5)) {
+				assertThat(h.handle(signedHeaders(body, NOW), body, NOW).status()).isEqualTo(200);
+			}
+
+			assertThat(seen1.get().legalMoves()).containsExactly(List.of("e2e4"));
+			assertThat(seen2.get().legalMoves()).containsExactly(List.of("e2e4"));
+			assertThat(seen3.get().legalMoves()).containsExactly(List.of("e2e4"));
+			assertThat(seen4.get().legalMoves()).containsExactly(List.of("e2e4"));
+			assertThat(seen5.get().legalMoves()).containsExactly(List.of("e2e4"));
+
+			// Constructors without URL default to DEFAULT_PLAY_API_BASE_URL (https://api.fortemate.com):
+			// 6. WebhookHandler(String, BotStrategy)
+			var h6 = new WebhookHandler(SECRET, ctx -> new TurnAction(List.of()));
+			// 7. WebhookHandler(WebhookKeys, BotStrategy)
+			var h7 = new WebhookHandler(keys, ctx -> new TurnAction(List.of()));
+
+			// Since api.fortemate.com is the default and unresolvable/offline in tests or without live server,
+			// both handlers attempt the fetch against the default URL without throwing
+			assertThat(h6.handle(signedHeaders(body, NOW), body, NOW).status()).isEqualTo(200);
+			assertThat(h7.handle(signedHeaders(body, NOW), body, NOW).status()).isEqualTo(200);
+		} finally {
+			server.stop(0);
+		}
+	}
+
+	@Test
+	void aFailedFirstFetchFollowedBySuccessfulRetryReturnsLegalMoves() throws IOException {
+		var calls = new AtomicInteger();
+		var fallback = "{\"version\":1,\"dfen\":\"x\",\"dicePending\":true,\"legalMoves\":{\"e2e4\":{\"e7e5\":{}}}}";
+		var server = HttpServer.create(new InetSocketAddress(0), 0);
+		server.createContext("/games/g1/moves", exchange -> {
+			int attempt = calls.incrementAndGet();
+			if (attempt == 1) {
+				// First attempt fails with 500
+				exchange.sendResponseHeaders(500, -1);
+			} else {
+				// Second attempt succeeds
+				var bytes = fallback.getBytes(StandardCharsets.UTF_8);
+				exchange.sendResponseHeaders(200, bytes.length);
+				try (var out = exchange.getResponseBody()) {
+					out.write(bytes);
+				}
+			}
+		});
+		server.start();
+
+		try {
+			var baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
+			var seen = new AtomicReference<TurnContext>();
+			var handler = new WebhookHandler(SECRET, baseUrl, ctx -> {
+				seen.set(ctx);
+				return new TurnAction(List.of());
+			});
+			// Clock has remaining time (e.g. 5000ms), allowing retry
+			var body = MINIMAL_TURN.replace(
+					"}}", ",\"clocks\":{\"white\":5000,\"black\":5000},\"legalMoves\":null}}");
+
+			assertThat(handler.handle(signedHeaders(body, NOW), body, NOW).status()).isEqualTo(200);
+			assertThat(calls.get()).isEqualTo(2);
+			assertThat(seen.get().legalMoves()).containsExactly(List.of("e2e4", "e7e5"));
+		} finally {
+			server.stop(0);
+		}
+	}
+
+	@Test
+	void aFailedFirstFetchDoesNotRetryIfTurnDeadlineHasPassed() throws IOException {
+		var calls = new AtomicInteger();
+		var server = HttpServer.create(new InetSocketAddress(0), 0);
+		server.createContext("/games/g1/moves", exchange -> {
+			calls.incrementAndGet();
+			exchange.sendResponseHeaders(500, -1);
+		});
+		server.start();
+
+		try {
+			var baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
+			var seen = new AtomicReference<TurnContext>();
+			var handler = new WebhookHandler(SECRET, baseUrl, ctx -> {
+				seen.set(ctx);
+				return new TurnAction(List.of());
+			});
+			// Clock has 0 remaining millis: deadline has passed
+			var body = MINIMAL_TURN.replace(
+					"}}", ",\"clocks\":{\"white\":0,\"black\":5000},\"legalMoves\":null}}");
+
+			assertThat(handler.handle(signedHeaders(body, NOW), body, NOW).status()).isEqualTo(200);
+			assertThat(calls.get()).isEqualTo(0);
+			assertThat(seen.get().legalMoves()).isNull();
+		} finally {
+			server.stop(0);
+		}
+	}
+
+	@Test
+	void aStaleFetchedTreeIsRejectedAndDegradesToNull() throws IOException {
+		var staleCalls = new AtomicInteger();
+		// State version is 0 (mismatch vs envelope version 1)
+		var staleFallback = "{\"version\":0,\"dfen\":\"x\",\"dicePending\":true,\"legalMoves\":{\"e2e4\":{}}}";
+		var server = stubMovesEndpoint("g1", staleFallback, staleCalls);
+		try {
+			var baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
+			var seen = new AtomicReference<TurnContext>();
+			var handler = new WebhookHandler(SECRET, baseUrl, ctx -> {
+				seen.set(ctx);
+				return new TurnAction(List.of());
+			});
+			var body = MINIMAL_TURN.replace("}}", ",\"legalMoves\":null}}");
+
+			assertThat(handler.handle(signedHeaders(body, NOW), body, NOW).status()).isEqualTo(200);
+			// First attempt returns null because stale; retry also fetches stale; result is null
+			assertThat(seen.get().legalMoves()).isNull();
+			assertThat(staleCalls.get()).isEqualTo(2);
+		} finally {
+			server.stop(0);
+		}
+	}
+
+	@Test
 	void drawDecisionsNeverFetchDiceDependentLegalMoves() throws IOException {
 		var calls = new AtomicInteger();
 		var server = stubMovesEndpoint("g1", "{\"legalMoves\":{}}", calls);
