@@ -419,7 +419,7 @@ class WebhookHandlerTest {
 					"}}", ",\"clocks\":{\"white\":0,\"black\":5000},\"legalMoves\":null}}");
 
 			assertThat(handler.handle(signedHeaders(body, NOW), body, NOW).status()).isEqualTo(200);
-			assertThat(calls.get()).isEqualTo(0);
+			assertThat(calls.get()).isZero();
 			assertThat(seen.get().legalMoves()).isNull();
 		} finally {
 			server.stop(0);

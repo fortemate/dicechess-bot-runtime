@@ -18,7 +18,8 @@ class ActionsAndContextsTest {
 		source.add("e7e5");
 		assertThat(action.moves()).containsExactly("e2e4");
 
-		assertThatThrownBy(() -> action.moves().add("e7e5"))
+		List<String> actionMoves = action.moves();
+		assertThatThrownBy(() -> actionMoves.add("e7e5"))
 				.isInstanceOf(UnsupportedOperationException.class);
 	}
 
@@ -121,9 +122,12 @@ class ActionsAndContextsTest {
 		assertThat(context.legalMoves()).containsExactly(List.of("e2e4", "e7e5"));
 
 		// Confirm context's returned lists are immutable
-		assertThatThrownBy(() -> context.legalMoves().add(List.of("d2d4")))
+		List<List<String>> legalMoves = context.legalMoves();
+		List<String> firstMove = legalMoves.get(0);
+		List<String> newMove = List.of("d2d4");
+		assertThatThrownBy(() -> legalMoves.add(newMove))
 				.isInstanceOf(UnsupportedOperationException.class);
-		assertThatThrownBy(() -> context.legalMoves().get(0).add("g1f3"))
+		assertThatThrownBy(() -> firstMove.add("g1f3"))
 				.isInstanceOf(UnsupportedOperationException.class);
 	}
 }
